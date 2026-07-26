@@ -1,8 +1,24 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::PathBuf;
-use ym_core::{with_spinner, AudioPlayer, DeltaCompiler, SystemHz, YmSequence};
+use std::time::Duration;
+use ym_core::{AudioPlayer, CompressionLevel, DeltaCompiler, HzOption, SystemHz, YmSequence};
+
+/// Runs `f` behind an animated spinner labeled `message`, for CLI feedback around a
+/// blocking call (e.g. chip-emulated decoding, pattern-size search).
+fn with_spinner<T>(message: &str, f: impl FnOnce() -> T) -> T {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
+    pb.set_message(message.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+
+    let result = f();
+
+    pb.finish_and_clear();
+    result
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -14,23 +30,6 @@ use ym_core::{with_spinner, AudioPlayer, DeltaCompiler, SystemHz, YmSequence};
 struct SongCli {
     #[command(subcommand)]
     command: SongCommands,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum SongHzOption {
-    #[value(name = "50")]
-    Hz50,
-    #[value(name = "60")]
-    Hz60,
-}
-
-impl From<SongHzOption> for SystemHz {
-    fn from(opt: SongHzOption) -> Self {
-        match opt {
-            SongHzOption::Hz50 => SystemHz::Hz50,
-            SongHzOption::Hz60 => SystemHz::Hz60,
-        }
-    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -47,7 +46,11 @@ enum SongCommands {
 
         /// Timing refresh rate override (50 or 60 Hz)
         #[arg(long, value_enum)]
-        hz: Option<SongHzOption>,
+        hz: Option<HzOption>,
+
+        /// Source chip clock in Hz. YM5/YM6 read from file header; older formats default to 2000000 (Atari ST). Override if needed.
+        #[arg(long)]
+        clock: Option<u32>,
 
         /// Frame step (downsample rate: e.g. 2 to skip every other frame)
         #[arg(short, long, default_value_t = 1)]
@@ -56,6 +59,24 @@ enum SongCommands {
         /// Maximum frames to process (cuts off song after this limit)
         #[arg(short, long)]
         max_frames: Option<usize>,
+
+        /// Compression level: full (delta+dedup), delta-only (delta, no dedup), none (raw registers)
+        #[arg(long, value_enum, default_value = "full")]
+        compression: CompressionArg,
+    },
+    /// Dump raw frame register data for diagnostic inspection
+    Dump {
+        /// Input .ym file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Number of frames to dump (default: 100)
+        #[arg(short, long, default_value_t = 100)]
+        frames: usize,
+
+        /// Starting frame index
+        #[arg(long, default_value_t = 0)]
+        start: usize,
     },
     /// Audition and play a music song file or stream
     Play {
@@ -65,20 +86,88 @@ enum SongCommands {
 
         /// Timing refresh rate override (50 or 60 Hz)
         #[arg(long, value_enum)]
-        hz: Option<SongHzOption>,
+        hz: Option<HzOption>,
+
+        /// Play a .ym file through our YmSequence pipeline instead of the raw replayer
+        #[arg(long)]
+        via_sequence: bool,
     },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum CompressionArg {
+    /// Delta encoding + pattern deduplication (smallest output)
+    Full,
+    /// Delta encoding only, no pattern deduplication
+    DeltaOnly,
+    /// Raw register writes every frame, no compression
+    None,
+    /// Full delta + dedup, then upkr compressed (smallest, requires decompressor on playback)
+    Lz,
+}
+
+impl From<CompressionArg> for CompressionLevel {
+    fn from(a: CompressionArg) -> Self {
+        match a {
+            CompressionArg::Full => CompressionLevel::Full,
+            CompressionArg::DeltaOnly => CompressionLevel::DeltaOnly,
+            CompressionArg::None => CompressionLevel::None,
+            CompressionArg::Lz => CompressionLevel::Lz,
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = SongCli::parse();
 
     match cli.command {
+        SongCommands::Dump { input, frames, start } => {
+            let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+            let ym_data = fs::read(&input)?;
+            let (sequence, _) = with_spinner("Decoding...", || {
+                YmSequence::from_ym_data(name, &ym_data, None)
+            })?;
+
+            let end = (start + frames).min(sequence.frames.len());
+            println!(
+                "{:>6}  {:>6} {:>6} {:>6}  {:>4}  {:>4}  {:>3} {:>3} {:>3}  {:>4} {:>4} {:>4}  {:>4}  {:>4}  R13",
+                "frame", "toneA", "toneB", "toneC", "volA", "volB", "volC",
+                "teA", "teB", "teC", "neA", "neB", "neC", "envP"
+            );
+            for (i, f) in sequence.frames[start..end].iter().enumerate() {
+                let r13 = match f.envelope_shape {
+                    Some(v) => format!("{}", v),
+                    None => "---".to_string(),
+                };
+                println!(
+                    "{:>6}  {:>6} {:>6} {:>6}  {:>4}  {:>4}  {:>3} {:>3} {:>3}  {:>4} {:>4} {:>4}  {:>4}  {:>4}  {}",
+                    start + i,
+                    f.tone_a.map(|v| v.to_string()).unwrap_or("-".into()),
+                    f.tone_b.map(|v| v.to_string()).unwrap_or("-".into()),
+                    f.tone_c.map(|v| v.to_string()).unwrap_or("-".into()),
+                    f.volume_a.map(|v| v.to_string()).unwrap_or("-".into()),
+                    f.volume_b.map(|v| v.to_string()).unwrap_or("-".into()),
+                    f.volume_c.map(|v| v.to_string()).unwrap_or("-".into()),
+                    f.tone_enable_a.map(|v| if v { "T" } else { "f" }).unwrap_or("-"),
+                    f.tone_enable_b.map(|v| if v { "T" } else { "f" }).unwrap_or("-"),
+                    f.tone_enable_c.map(|v| if v { "T" } else { "f" }).unwrap_or("-"),
+                    f.noise_enable_a.map(|v| if v { "T" } else { "f" }).unwrap_or("-"),
+                    f.noise_enable_b.map(|v| if v { "T" } else { "f" }).unwrap_or("-"),
+                    f.noise_enable_c.map(|v| if v { "T" } else { "f" }).unwrap_or("-"),
+                    f.envelope_period.map(|v| v.to_string()).unwrap_or("-".into()),
+                    r13,
+                );
+            }
+            println!("\nTotal frames: {}", sequence.frames.len());
+        }
         SongCommands::Render {
             input,
             output,
             hz,
+            clock,
             step,
             max_frames,
+            compression,
         } => {
             let output_path = output.unwrap_or_else(|| {
                 let mut path = input.clone();
@@ -96,18 +185,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let mut original_ym_size: Option<usize> = None;
-            let mut sequence = if extension.eq_ignore_ascii_case("ym") {
+            let (mut sequence, digidrum_frames) = if extension.eq_ignore_ascii_case("ym") {
                 let bytes = fs::read(&input)?;
                 original_ym_size = Some(YmSequence::ym_decompressed_len(&bytes)?);
                 with_spinner("Decoding YM chiptune (emulating playback)...", || {
-                    YmSequence::from_ym_data(name, &bytes)
+                    YmSequence::from_ym_data(name, &bytes, clock)
                 })?
             } else {
                 let content = fs::read_to_string(&input)?;
-                serde_json::from_str(&content)?
+                (serde_json::from_str(&content)?, 0)
             };
 
             // Apply frame limit and step decimation
+            let step = step.max(1);
             let limit = max_frames
                 .unwrap_or(sequence.frames.len())
                 .min(sequence.frames.len());
@@ -115,23 +205,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut i = 0;
             while i < limit {
                 let window_end = (i + step).min(limit);
-                let mut final_frame = sequence.frames[i].clone();
 
-                // Peak volume detector over the step window
-                let mut max_vol_a = 0u8;
-                let mut max_vol_b = 0u8;
-                let mut max_vol_c = 0u8;
+                // Peak volume & state detector per channel over step window
+                let mut best_idx_a = i;
+                let mut best_vol_a = sequence.frames[i].volume_a.unwrap_or(0);
+                let mut best_idx_b = i;
+                let mut best_vol_b = sequence.frames[i].volume_b.unwrap_or(0);
+                let mut best_idx_c = i;
+                let mut best_vol_c = sequence.frames[i].volume_c.unwrap_or(0);
 
                 for idx in i..window_end {
                     let f = &sequence.frames[idx];
-                    max_vol_a = max_vol_a.max(f.volume_a.unwrap_or(0));
-                    max_vol_b = max_vol_b.max(f.volume_b.unwrap_or(0));
-                    max_vol_c = max_vol_c.max(f.volume_c.unwrap_or(0));
+                    let v_a = f.volume_a.unwrap_or(0);
+                    if v_a > best_vol_a {
+                        best_vol_a = v_a;
+                        best_idx_a = idx;
+                    }
+                    let v_b = f.volume_b.unwrap_or(0);
+                    if v_b > best_vol_b {
+                        best_vol_b = v_b;
+                        best_idx_b = idx;
+                    }
+                    let v_c = f.volume_c.unwrap_or(0);
+                    if v_c > best_vol_c {
+                        best_vol_c = v_c;
+                        best_idx_c = idx;
+                    }
                 }
 
-                final_frame.volume_a = Some(max_vol_a);
-                final_frame.volume_b = Some(max_vol_b);
-                final_frame.volume_c = Some(max_vol_c);
+                // Global registers (noise period, envelope) come from the loudest channel's
+                // peak frame so they stay in sync with the most audible moment in the window.
+                let dominant_idx = if best_vol_a >= best_vol_b && best_vol_a >= best_vol_c {
+                    best_idx_a
+                } else if best_vol_b >= best_vol_c {
+                    best_idx_b
+                } else {
+                    best_idx_c
+                };
+
+                let mut final_frame = sequence.frames[i].clone();
+
+                // Channel A parameters from peak volume frame
+                final_frame.volume_a = sequence.frames[best_idx_a].volume_a;
+                final_frame.tone_a = sequence.frames[best_idx_a].tone_a;
+                final_frame.tone_enable_a = sequence.frames[best_idx_a].tone_enable_a;
+                final_frame.noise_enable_a = sequence.frames[best_idx_a].noise_enable_a;
+
+                // Channel B parameters from peak volume frame
+                final_frame.volume_b = sequence.frames[best_idx_b].volume_b;
+                final_frame.tone_b = sequence.frames[best_idx_b].tone_b;
+                final_frame.tone_enable_b = sequence.frames[best_idx_b].tone_enable_b;
+                final_frame.noise_enable_b = sequence.frames[best_idx_b].noise_enable_b;
+
+                // Channel C parameters from peak volume frame
+                final_frame.volume_c = sequence.frames[best_idx_c].volume_c;
+                final_frame.tone_c = sequence.frames[best_idx_c].tone_c;
+                final_frame.tone_enable_c = sequence.frames[best_idx_c].tone_enable_c;
+                final_frame.noise_enable_c = sequence.frames[best_idx_c].noise_enable_c;
+
+                // Shared registers from dominant channel's peak frame
+                final_frame.noise_period = sequence.frames[dominant_idx].noise_period;
+                final_frame.envelope_period = sequence.frames[dominant_idx].envelope_period;
+                final_frame.envelope_shape = sequence.frames[dominant_idx].envelope_shape;
 
                 decimated_frames.push(final_frame);
                 i += step;
@@ -147,9 +282,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let compiler = DeltaCompiler::new();
-            let compiled = with_spinner("Compiling song (searching pattern sizes)...", || {
-                compiler.compile_song(&sequence)
-            });
+            let compression_level: CompressionLevel = compression.into();
+            let spinner_msg = match compression_level {
+                CompressionLevel::Full => "Compiling song (delta + dedup)...",
+                CompressionLevel::DeltaOnly => "Compiling song (delta only, no dedup)...",
+                CompressionLevel::None => "Compiling song (raw registers, no compression)...",
+                CompressionLevel::Lz => "Compiling song (delta + dedup + upkr LZ)...",
+            };
+            let compiled = with_spinner(spinner_msg, || {
+                compiler.compile_song(&sequence, compression_level)
+            })?;
 
             fs::write(&output_path, &compiled.bytes)?;
 
@@ -163,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "; ca65 include generated by ym-song for {}\n\
                  MAX_FRAMES   = {}\n\
                  PLAYER_HZ    = {}\n\
+                 MASTER_CLOCK = {}\n\
                  YM_DELAY     = {}\n\
                  YM_FINE      = {}\n\
                  PATTERN_SIZE = {}\n\
@@ -171,6 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 input.display(),
                 sequence.frames.len(),
                 final_hz,
+                sequence.timing.master_clock_hz,
                 delay_y,
                 delay_x,
                 compiled.pattern_size,
@@ -196,6 +340,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 style(delay_x).cyan()
             );
 
+            if digidrum_frames > 0 {
+                println!(
+                    "{} {} frames contain YM6 digi-drum data (PCM samples) — drums dropped, pitched content preserved",
+                    style("WARNING:").bold().yellow(),
+                    style(digidrum_frames).yellow(),
+                );
+            }
+
             if let Some(original_size) = original_ym_size {
                 let new_size = compiled.bytes.len();
                 let pct_change = if original_size > 0 {
@@ -217,7 +369,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        SongCommands::Play { input, hz } => {
+        SongCommands::Play { input, hz, via_sequence } => {
             let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
             if extension == "json" {
@@ -252,6 +404,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sequence.timing.frame_rate.hz_value()
                 );
 
+                AudioPlayer::play(&sequence)?;
+            } else if via_sequence && extension.eq_ignore_ascii_case("ym") {
+                let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+                let ym_data = fs::read(&input)?;
+                let (mut sequence, _) = with_spinner("Decoding YM via YmSequence pipeline...", || {
+                    YmSequence::from_ym_data(name, &ym_data, None)
+                })?;
+                if let Some(hz_override) = hz {
+                    sequence.timing.frame_rate = hz_override.into();
+                }
+                println!(
+                    "{} {} ({} frames @ {} Hz via YmSequence)...",
+                    style("LOADING:").bold().cyan(),
+                    style(input.display()).cyan(),
+                    sequence.frames.len(),
+                    sequence.timing.frame_rate.hz_value()
+                );
                 AudioPlayer::play(&sequence)?;
             } else {
                 println!(

@@ -1,16 +1,15 @@
 pub mod delta;
 pub mod player;
-pub mod progress;
-pub mod registers;
 pub mod sequence;
 pub mod timing;
 
-pub use delta::{DeltaCompiler, SongCompilation};
+pub use delta::{CompressionLevel, DeltaCompiler, YmSongDetails, UPKR_MAGIC};
 pub use player::AudioPlayer;
-pub use progress::with_spinner;
-pub use registers::YmRegisters;
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
-pub use timing::{SystemHz, TimingConfig, calculate_delay};
+pub use timing::{
+    calculate_delay, HzOption, SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK,
+    ZX_SPECTRUM_CLOCK,
+};
 
 #[cfg(test)]
 mod tests {
@@ -34,12 +33,11 @@ mod tests {
         assert_eq!(calculate_delay(60), (21, 209));
     }
 
-
     #[test]
     fn test_delta_compiler_basic() {
         let mut seq = SfxSequence {
             name: "test_sfx".to_string(),
-            source_clock: 2_000_000,
+            source_clock: ATARI_ST_CLOCK,
             source_hz: 50,
             priority: 0,
             preferred_channels: None,
@@ -64,7 +62,7 @@ mod tests {
         let seq = SfxSequence::from_ayfx_csv("laser", csv_data).unwrap();
 
         assert_eq!(seq.name, "laser");
-        assert_eq!(seq.source_clock, 2_000_000);
+        assert_eq!(seq.source_clock, ZX_SPECTRUM_CLOCK);
         assert_eq!(seq.source_hz, 50);
         assert_eq!(seq.frames.len(), 2);
 
@@ -102,7 +100,7 @@ mod tests {
     fn test_from_yfx() {
         let source_seq = SfxSequence {
             name: "test_sfx".to_string(),
-            source_clock: 2_000_000,
+            source_clock: ATARI_ST_CLOCK,
             source_hz: 50,
             priority: 1,
             preferred_channels: None,
@@ -184,7 +182,7 @@ mod tests {
         };
 
         let compiler = DeltaCompiler::new();
-        let compiled = compiler.compile_song(&song);
+        let compiled = compiler.compile_song(&song, CompressionLevel::Full).unwrap();
         let ysg_bytes = compiled.bytes;
 
         let chosen_size = compiled.pattern_size;
@@ -199,5 +197,86 @@ mod tests {
         assert_eq!(decoded.frames[69].tone_a, Some(269));
         assert_eq!(decoded.timing.master_clock_hz, 1_789_773);
         assert_eq!(decoded.timing.frame_rate.hz_value(), 17);
+    }
+
+    #[test]
+    fn test_lz_roundtrip_with_real_file() {
+        let ym_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/song/ND-Loader.ym"
+        );
+        let ym_data = match std::fs::read(ym_path) {
+            Ok(d) => d,
+            Err(_) => return, // skip if fixture missing
+        };
+        let (sequence, _) = YmSequence::from_ym_data("ND-Loader", &ym_data, None).unwrap();
+
+        let compiler = DeltaCompiler::new();
+        let full = compiler.compile_song(&sequence, CompressionLevel::Full).unwrap();
+        let lz = compiler.compile_song(&sequence, CompressionLevel::Lz).unwrap();
+
+        let decompressed = DeltaCompiler::upkr_unpack(&lz.bytes).unwrap();
+
+        assert_eq!(
+            decompressed.len(), full.bytes.len(),
+            "Decompressed length {} != full length {}",
+            decompressed.len(), full.bytes.len()
+        );
+        assert_eq!(
+            decompressed, full.bytes,
+            "LZ round-trip is NOT byte-identical for real ND-Loader data"
+        );
+    }
+
+    #[test]
+    fn test_lz_roundtrip_matches_full() {
+        let mut frames = Vec::new();
+        for i in 0..70 {
+            frames.push(YmFrame {
+                tone_a: Some(200 + i as u16),
+                volume_a: Some(15),
+                tone_enable_a: Some(true),
+                ..Default::default()
+            });
+        }
+        let song = YmSequence {
+            name: "lz_test".to_string(),
+            timing: crate::timing::TimingConfig {
+                master_clock_hz: ATARI_7800_CLOCK,
+                frame_rate: crate::timing::SystemHz::Hz50,
+            },
+            priority: 0,
+            loop_start: None,
+            frames,
+        };
+
+        let compiler = DeltaCompiler::new();
+        let full = compiler.compile_song(&song, CompressionLevel::Full).unwrap();
+        let lz = compiler.compile_song(&song, CompressionLevel::Lz).unwrap();
+
+        // LZ file must start with YZLZ magic
+        assert_eq!(&lz.bytes[0..4], &UPKR_MAGIC);
+
+        // Decompressed bytes must be bit-for-bit identical to the plain Full output
+        let decompressed = DeltaCompiler::upkr_unpack(&lz.bytes).unwrap();
+        assert_eq!(
+            decompressed, full.bytes,
+            "LZ round-trip produced different bytes from Full compression"
+        );
+    }
+
+    #[test]
+    fn test_zero_hz_safety() {
+        let (y, _x) = calculate_delay(0);
+        assert!(y > 0);
+
+        let hz_custom = SystemHz::Custom(0);
+        assert!(hz_custom.frame_duration_ms().is_finite());
+    }
+
+    #[test]
+    fn test_truncated_ysg_returns_err() {
+        let truncated_bytes = vec![64, 2, 5, 0]; // 4 bytes instead of >=12
+        assert!(YmSequence::from_ysg("bad", &truncated_bytes).is_err());
     }
 }
