@@ -3,7 +3,7 @@ pub mod player;
 pub mod sequence;
 pub mod timing;
 
-pub use delta::{CompressionLevel, DeltaCompiler, YmSongDetails, UPKR_MAGIC};
+pub use delta::{CompilerOptions, CompressionLevel, DeltaCompiler, YmSongDetails, RLE_FLAG};
 pub use player::AudioPlayer;
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
 pub use timing::{
@@ -182,7 +182,9 @@ mod tests {
         };
 
         let compiler = DeltaCompiler::new();
-        let compiled = compiler.compile_song(&song, CompressionLevel::Full).unwrap();
+        let compiled = compiler
+            .compile_song(&song, CompressionLevel::Full, &CompilerOptions::default())
+            .unwrap();
         let ysg_bytes = compiled.bytes;
 
         let chosen_size = compiled.pattern_size;
@@ -200,47 +202,29 @@ mod tests {
     }
 
     #[test]
-    fn test_lz_roundtrip_with_real_file() {
-        let ym_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/song/ND-Loader.ym"
-        );
-        let ym_data = match std::fs::read(ym_path) {
-            Ok(d) => d,
-            Err(_) => return, // skip if fixture missing
-        };
-        let (sequence, _) = YmSequence::from_ym_data("ND-Loader", &ym_data, None).unwrap();
+    fn test_zero_hz_safety() {
+        let (y, _x) = calculate_delay(0);
+        assert!(y > 0);
 
-        let compiler = DeltaCompiler::new();
-        let full = compiler.compile_song(&sequence, CompressionLevel::Full).unwrap();
-        let lz = compiler.compile_song(&sequence, CompressionLevel::Lz).unwrap();
-
-        let decompressed = DeltaCompiler::upkr_unpack(&lz.bytes).unwrap();
-
-        assert_eq!(
-            decompressed.len(), full.bytes.len(),
-            "Decompressed length {} != full length {}",
-            decompressed.len(), full.bytes.len()
-        );
-        assert_eq!(
-            decompressed, full.bytes,
-            "LZ round-trip is NOT byte-identical for real ND-Loader data"
-        );
+        let hz_custom = SystemHz::Custom(0);
+        assert!(hz_custom.frame_duration_ms().is_finite());
     }
 
     #[test]
-    fn test_lz_roundtrip_matches_full() {
+    fn test_rle_reduces_idle_frames() {
+        // Build a song with a long silent section — should shrink with RLE enabled.
         let mut frames = Vec::new();
-        for i in 0..70 {
-            frames.push(YmFrame {
-                tone_a: Some(200 + i as u16),
-                volume_a: Some(15),
-                tone_enable_a: Some(true),
-                ..Default::default()
-            });
+        frames.push(YmFrame {
+            tone_a: Some(440),
+            volume_a: Some(15),
+            tone_enable_a: Some(true),
+            ..Default::default()
+        });
+        for _ in 0..50 {
+            frames.push(YmFrame::default()); // 50 idle frames
         }
         let song = YmSequence {
-            name: "lz_test".to_string(),
+            name: "rle_test".to_string(),
             timing: crate::timing::TimingConfig {
                 master_clock_hz: ATARI_7800_CLOCK,
                 frame_rate: crate::timing::SystemHz::Hz50,
@@ -249,29 +233,38 @@ mod tests {
             loop_start: None,
             frames,
         };
-
         let compiler = DeltaCompiler::new();
-        let full = compiler.compile_song(&song, CompressionLevel::Full).unwrap();
-        let lz = compiler.compile_song(&song, CompressionLevel::Lz).unwrap();
-
-        // LZ file must start with YZLZ magic
-        assert_eq!(&lz.bytes[0..4], &UPKR_MAGIC);
-
-        // Decompressed bytes must be bit-for-bit identical to the plain Full output
-        let decompressed = DeltaCompiler::upkr_unpack(&lz.bytes).unwrap();
-        assert_eq!(
-            decompressed, full.bytes,
-            "LZ round-trip produced different bytes from Full compression"
+        let with_rle = compiler
+            .compile_song(
+                &song,
+                CompressionLevel::Full,
+                &CompilerOptions {
+                    rle: true,
+                    ..CompilerOptions::default()
+                },
+            )
+            .unwrap();
+        let without_rle = compiler
+            .compile_song(
+                &song,
+                CompressionLevel::Full,
+                &CompilerOptions {
+                    rle: false,
+                    ..CompilerOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            with_rle.bytes.len() < without_rle.bytes.len(),
+            "RLE should reduce size for idle-heavy songs"
         );
-    }
 
-    #[test]
-    fn test_zero_hz_safety() {
-        let (y, _x) = calculate_delay(0);
-        assert!(y > 0);
-
-        let hz_custom = SystemHz::Custom(0);
-        assert!(hz_custom.frame_duration_ms().is_finite());
+        // Round-trip: decoded frame count must match
+        let decoded = YmSequence::from_ysg("rle_test", &with_rle.bytes).unwrap();
+        assert_eq!(
+            decoded.frames.len(),
+            song.frames.len().next_multiple_of(with_rle.pattern_size)
+        );
     }
 
     #[test]

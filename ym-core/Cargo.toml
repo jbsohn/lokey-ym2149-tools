@@ -12,6 +12,5 @@ ym2149-ym-replayer.workspace = true
 ym2149-common.workspace = true
 indicatif.workspace = true
 console.workspace = true
-upkr.workspace = true
 
 

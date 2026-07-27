@@ -22,7 +22,7 @@ This document consolidates the specification of all asset formats, inputs, and b
 The `.ysg` (YM Song) format stores pattern-compressed register data optimized for low CPU overhead on the 6502 CPU and bank-switched cartridges.
 
 ### Header Structure
-The file begins with a **4-byte fixed header**:
+The file begins with a **14-byte fixed header**:
 
 | Offset | Size | Name | Description |
 | :--- | :--- | :--- | :--- |
@@ -30,6 +30,10 @@ The file begins with a **4-byte fixed header**:
 | **1** | 1 byte | `NumUnique` | Total number of unique pattern blocks stored (Max 255). |
 | **2** | 1 byte | `SeqLen` | Total number of pattern entries in the sequence table (Max 255). |
 | **3** | 1 byte | `LoopPattern` | Index in the sequence table to loop back to (255 = no loop). |
+| **4–7** | 4 bytes | `FrameRateHz` | Music frame rate in Hz (u32 little-endian, typically 50 or 60). |
+| **8–11** | 4 bytes | `MasterClkHz` | YM2149 master clock in Hz (u32 little-endian, e.g. 1789773). |
+| **12** | 1 byte | `LastPatFrames` | Real frame count in the last sequence entry (0 = full pattern). |
+| **13** | 1 byte | `Features` | Compression feature flags (bit 0 = RLE active, bit 1 = varlen mask). |
 
 ### Sequence Table
 Immediately following the header:
@@ -44,10 +48,14 @@ Following the sequence table:
 
 ### Pattern Data
 The final block contains the compressed frame streams:
-* **Format**: Bitmask Deltas.
-* **Frame Structure**:
+* **Format**: Bitmask Deltas with optional RLE tokens.
+* **Normal Frame Structure**:
   1. **Mask (2 bytes)**: 16-bit little-endian value. Bits 0–13 represent YM2149 registers 0–13. A `1` indicates the register is modified; `0` carries the previous frame's value forward.
   2. **Payload (Variable)**: The register values corresponding to `1` bits in the mask, packed sequentially.
+* **RLE Token** (when `Features` bit 0 is set): When a run of 2 or more consecutive idle frames occurs, they are replaced by a 3-byte token:
+  1. **Mask (2 bytes)**: `0x00 0x80` — bit 15 set (`0x8000`), all register bits clear.
+  2. **Count (1 byte)**: `N` — represents `N + 1` additional idle frames (total run = `N + 1`).
+  * The player reads the count byte, subtracts `N` from its remaining-frame counter, and returns without writing any registers.
 * **Pattern Independence**: The first frame of every pattern block is unconditionally encoded with a full `0x3FFF` mask (resetting all 14 registers), enabling $O(1)$ pattern seeking, looping, and clean SFX channel recovery.
 
 ---

@@ -23,8 +23,8 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len}{msg}",
         )
-            .unwrap()
-            .progress_chars("=>-"),
+        .unwrap()
+        .progress_chars("=>-"),
     );
     pb
 }
@@ -186,7 +186,12 @@ impl AudioPlayer {
                                     s.frame_idx = l_start;
                                     let idx = s.frame_idx;
                                     let s = &mut *s;
-                                    apply(&frames_cb[idx], &mut s.chip, &mut s.mixer, &mut s.last_env_shape);
+                                    apply(
+                                        &frames_cb[idx],
+                                        &mut s.chip,
+                                        &mut s.mixer,
+                                        &mut s.last_env_shape,
+                                    );
                                 } else {
                                     s.finished = true;
                                     finished_atomic.store(true, Ordering::Relaxed);
@@ -194,7 +199,12 @@ impl AudioPlayer {
                             } else {
                                 let idx = s.frame_idx;
                                 let s = &mut *s;
-                                apply(&frames_cb[idx], &mut s.chip, &mut s.mixer, &mut s.last_env_shape);
+                                apply(
+                                    &frames_cb[idx],
+                                    &mut s.chip,
+                                    &mut s.mixer,
+                                    &mut s.last_env_shape,
+                                );
                             }
                             current_frame_atomic.store(s.frame_idx, Ordering::Relaxed);
                         }
@@ -277,7 +287,9 @@ impl AudioPlayer {
             chip,
             frames,
             loop_start_val,
-            |frame: &YmFrame, chip, mixer, last_env_shape| frame.apply_to_chip(chip, mixer, last_env_shape),
+            |frame: &YmFrame, chip, mixer, last_env_shape| {
+                frame.apply_to_chip(chip, mixer, last_env_shape)
+            },
         )?;
 
         stream.play()?;

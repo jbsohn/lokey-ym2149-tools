@@ -34,6 +34,7 @@ pub struct YmSequence {
     pub frames: Vec<YmFrame>,
 }
 
+#[allow(dead_code)]
 struct YsgHeader {
     pattern_size: usize,
     num_unique: usize,
@@ -41,19 +42,16 @@ struct YsgHeader {
     loop_pattern: usize,
     frame_rate_hz: u32,
     master_clock_hz: u32,
+    last_pat_frames: usize,
+    features: u8,
 }
 
 impl YmSequence {
     /// Deserializes a compiled .ysg binary stream into a YmSequence.
-    /// Transparently decompresses upkr-wrapped files (YZLZ magic header).
     pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() >= 4 && &bytes[0..4] == &crate::delta::UPKR_MAGIC {
-            let decompressed = crate::delta::DeltaCompiler::upkr_unpack(bytes)?;
-            return Self::from_ysg(name, &decompressed);
-        }
         let header = Self::parse_ysg_header(bytes)?;
 
-        let seq_table_start = 12;
+        let seq_table_start = 14;
         let offset_table_start = seq_table_start + header.seq_len;
         let pattern_data_start = offset_table_start + header.num_unique * 4;
 
@@ -70,6 +68,8 @@ impl YmSequence {
             &offsets,
             header.num_unique,
             header.pattern_size,
+            header.last_pat_frames,
+            header.features,
         )?;
 
         let loop_start = if header.loop_pattern == 255 {
@@ -90,9 +90,9 @@ impl YmSequence {
         })
     }
 
-    /// Parses the 12-byte header from a YSG binary stream.
+    /// Parses the 13-byte header from a YSG binary stream.
     fn parse_ysg_header(bytes: &[u8]) -> Result<YsgHeader, Box<dyn std::error::Error>> {
-        if bytes.len() < 12 {
+        if bytes.len() < 14 {
             return Err("YSG file too small to contain header".into());
         }
         let pattern_size = bytes[0] as usize;
@@ -101,6 +101,8 @@ impl YmSequence {
         let loop_pattern = bytes[3] as usize;
         let frame_rate_hz = u32::from_le_bytes(bytes[4..8].try_into()?);
         let master_clock_hz = u32::from_le_bytes(bytes[8..12].try_into()?);
+        let last_pat_frames = bytes[12] as usize;
+        let features = bytes[13];
         Ok(YsgHeader {
             pattern_size,
             num_unique,
@@ -108,6 +110,8 @@ impl YmSequence {
             loop_pattern,
             frame_rate_hz,
             master_clock_hz,
+            last_pat_frames,
+            features,
         })
     }
 
@@ -156,43 +160,81 @@ impl YmSequence {
         offsets: &[usize],
         num_unique: usize,
         pattern_size: usize,
+        last_pat_frames: usize,
+        features: u8,
     ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
         let mut frames = Vec::new();
+        let last_entry = sequence_table.len().saturating_sub(1);
 
-        for &pattern_idx in sequence_table {
+        for (entry_idx, &pattern_idx) in sequence_table.iter().enumerate() {
             if pattern_idx >= num_unique {
                 return Err(format!(
                     "Sequence index {} out of range (max {})",
                     pattern_idx, num_unique
                 )
-                    .into());
+                .into());
             }
             let start_ptr = pattern_data_start + offsets[pattern_idx];
             if start_ptr >= bytes.len() {
                 return Err("YSG pattern offset out of bounds".into());
             }
-            frames.extend(Self::decode_ysg_pattern(bytes, start_ptr, pattern_size)?);
+            let frames_to_decode = if entry_idx == last_entry && last_pat_frames > 0 {
+                last_pat_frames
+            } else {
+                pattern_size
+            };
+            frames.extend(Self::decode_ysg_pattern(
+                bytes,
+                start_ptr,
+                frames_to_decode,
+                features,
+            )?);
         }
 
         Ok(frames)
     }
 
+    fn is_rle_token(mask: u16, rle_enabled: bool) -> bool {
+        rle_enabled && (mask & crate::delta::RLE_FLAG) != 0
+    }
+
     /// Decodes one pattern's delta-encoded register stream into frames.
+    /// Handles RLE tokens (mask bit 15 set) when features bit 0 is set.
     fn decode_ysg_pattern(
         bytes: &[u8],
         start_ptr: usize,
         pattern_size: usize,
+        features: u8,
     ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
+        let rle_enabled = (features & 0x01) != 0;
         let mut frames = Vec::with_capacity(pattern_size);
         let mut pp = start_ptr;
         let mut registers = [0u8; 14];
 
-        for _ in 0..pattern_size {
+        while frames.len() < pattern_size {
             if pp + 1 >= bytes.len() {
                 return Err("Unexpected EOF in YSG pattern data".into());
             }
             let mask = bytes[pp] as u16 | ((bytes[pp + 1] as u16) << 8);
             pp += 2;
+
+            if Self::is_rle_token(mask, rle_enabled) {
+                if pp >= bytes.len() {
+                    return Err("Unexpected EOF in YSG RLE count byte".into());
+                }
+                let n = bytes[pp] as usize;
+                pp += 1;
+                let emit = (n + 1).min(pattern_size - frames.len());
+                let frame = {
+                    let mut f = Self::registers_to_frame(&registers);
+                    f.envelope_shape = None;
+                    f
+                };
+                for _ in 0..emit {
+                    frames.push(frame.clone());
+                }
+                continue;
+            }
 
             let r13_written = (mask & (1 << 13)) != 0;
 
@@ -225,13 +267,19 @@ impl YmSequence {
         reg_14[1] &= 0x0F; // R1 bits 4-7 unused
         reg_14[3] &= 0x0F; // R3 bits 4-7 unused
         reg_14[5] &= 0x0F; // R5 bits 4-7 unused
-        // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
-        // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
-        // chip — silence those channels to prevent false envelope-mode triggering.
+                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
+                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
+                           // chip — silence those channels to prevent false envelope-mode triggering.
         let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
-        if reg_14[8] > 0x1F { reg_14[8] = 0; }
-        if reg_14[9] > 0x1F { reg_14[9] = 0; }
-        if reg_14[10] > 0x1F { reg_14[10] = 0; }
+        if reg_14[8] > 0x1F {
+            reg_14[8] = 0;
+        }
+        if reg_14[9] > 0x1F {
+            reg_14[9] = 0;
+        }
+        if reg_14[10] > 0x1F {
+            reg_14[10] = 0;
+        }
         (reg_14, has_digidrum)
     }
 
@@ -288,6 +336,42 @@ impl YmSequence {
         let ratio = target_clock as f64 / source_clock as f64;
         let apply_scaling = (ratio - 1.0).abs() > 0.0001;
 
+        // YM2 / YM3 format: interleaved register data (all R0 values, then all R1, ...) at 50 Hz.
+        // Same interleaved layout as YM5 but without metadata. Chip clock assumed 2 MHz (Atari ST).
+        if decompressed.len() >= 4 {
+            let magic = &decompressed[0..4];
+            if magic == b"YM2!" || magic == b"YM3!" {
+                let data = &decompressed[4..];
+                let frame_count = data.len() / 14;
+                let mut frames = Vec::with_capacity(frame_count);
+                for f in 0..frame_count {
+                    let mut raw16 = [0u8; 16];
+                    for r in 0..14 {
+                        raw16[r] = data[r * frame_count + f];
+                    }
+                    let (reg_14, _) = Self::sanitize_raw_frame(&raw16);
+                    let mut frame = Self::registers_to_frame(&reg_14);
+                    if apply_scaling {
+                        frame.scale_pitch(ratio);
+                    }
+                    frames.push(frame);
+                }
+                return Ok((
+                    Self {
+                        name: name.to_string(),
+                        timing: TimingConfig {
+                            master_clock_hz: target_clock,
+                            frame_rate: SystemHz::Hz50,
+                        },
+                        priority: 0,
+                        loop_start: None,
+                        frames,
+                    },
+                    0,
+                ));
+            }
+        }
+
         let (player, summary) = load_song(&decompressed)?;
         let total_frames = summary.frame_count;
 
@@ -305,25 +389,35 @@ impl YmSequence {
             .take(total_frames)
             .map(|raw| {
                 let (reg_14, has_digidrum) = Self::sanitize_raw_frame(&raw);
-                if has_digidrum { digidrum_frames += 1; }
+                if has_digidrum {
+                    digidrum_frames += 1;
+                }
                 let mut frame = Self::registers_to_frame(&reg_14);
-                frame.envelope_shape =
-                    if raw[13] == 0xFF { None } else { Some(raw[13] & 0x0F) };
-                if apply_scaling { frame.scale_pitch(ratio); }
+                frame.envelope_shape = if raw[13] == 0xFF {
+                    None
+                } else {
+                    Some(raw[13] & 0x0F)
+                };
+                if apply_scaling {
+                    frame.scale_pitch(ratio);
+                }
                 frame
             })
             .collect();
 
-        Ok((Self {
-            name: name.to_string(),
-            timing: TimingConfig {
-                master_clock_hz: target_clock,
-                frame_rate: SystemHz::Hz50,
+        Ok((
+            Self {
+                name: name.to_string(),
+                timing: TimingConfig {
+                    master_clock_hz: target_clock,
+                    frame_rate: SystemHz::Hz50,
+                },
+                priority: 0,
+                loop_start,
+                frames,
             },
-            priority: 0,
-            loop_start,
-            frames,
-        }, digidrum_frames))
+            digidrum_frames,
+        ))
     }
 
     /// Detects the target YM clock frequency from chiptune header.
@@ -521,6 +615,26 @@ pub struct SfxFrame {
     pub duration: Option<u8>,
 }
 
+impl SfxFrame {
+    pub fn new(
+        tone_enable: bool,
+        noise_enable: bool,
+        tone: u16,
+        noise: u8,
+        volume: u8,
+        duration: u8,
+    ) -> Self {
+        Self {
+            tone_enable: Some(tone_enable),
+            noise_enable: Some(noise_enable),
+            tone: Some(tone),
+            noise: Some(noise),
+            volume: Some(volume),
+            duration: Some(duration),
+        }
+    }
+}
+
 /// Channel-agnostic Sound Effect manifest matching sfx-schema.json.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -613,7 +727,7 @@ impl SfxSequence {
                     line_num + 1,
                     parts.len()
                 )
-                    .into());
+                .into());
             }
 
             let t = parts[0].parse::<i32>()? != 0;
@@ -633,14 +747,7 @@ impl SfxSequence {
             let noise = (parse_val(parts[3])? & 0x1F) as u8;
             let volume = (parse_val(parts[4])? & 0x1F) as u8;
 
-            frames.push(SfxFrame {
-                tone_enable: Some(t),
-                noise_enable: Some(n),
-                tone: Some(tone),
-                noise: Some(noise),
-                volume: Some(volume),
-                duration: Some(1),
-            });
+            frames.push(SfxFrame::new(t, n, tone, noise, volume, 1));
         }
 
         Ok(Self {
@@ -799,14 +906,7 @@ impl SfxSequence {
             let t_enable = (it & (1 << 4)) == 0;
             let n_enable = (it & (1 << 7)) == 0;
 
-            frames.push(SfxFrame {
-                tone_enable: Some(t_enable),
-                noise_enable: Some(n_enable),
-                tone: Some(tone),
-                noise: Some(noise),
-                volume: Some(vol),
-                duration: Some(1),
-            });
+            frames.push(SfxFrame::new(t_enable, n_enable, tone, noise, vol, 1));
         }
 
         (frames, pp)
@@ -849,14 +949,14 @@ impl SfxSequence {
             let noise_enable = (control & 0x02) != 0;
             let noise = (control >> 3) & 0x1F;
 
-            frames.push(SfxFrame {
-                tone_enable: Some(tone_enable),
-                noise_enable: Some(noise_enable),
-                tone: Some(tone),
-                noise: Some(noise),
-                volume: Some(volume),
-                duration: Some(duration),
-            });
+            frames.push(SfxFrame::new(
+                tone_enable,
+                noise_enable,
+                tone,
+                noise,
+                volume,
+                duration,
+            ));
         }
 
         frames

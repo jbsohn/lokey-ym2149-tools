@@ -1,7 +1,7 @@
 use crate::sequence::{SfxSequence, YmSequence};
 
-/// Magic prefix for upkr-compressed YSG files.
-pub const UPKR_MAGIC: [u8; 4] = [b'Y', b'Z', b'L', b'Z'];
+/// Bit 15 of the 16-bit frame mask — signals an RLE idle-run token.
+pub const RLE_FLAG: u16 = 0x8000;
 
 /// Controls how much compression is applied when compiling a song.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,8 +12,43 @@ pub enum CompressionLevel {
     DeltaOnly,
     /// None: write all 14 registers every frame (no delta, no dedup). Raw register stream.
     None,
-    /// Lz: full delta + dedup, then upkr-compressed. Smallest output, requires decompression on playback.
-    Lz,
+}
+
+/// Fine-grained feature flags for [`DeltaCompiler::compile_song`].
+///
+/// Use `CompilerOptions::default()` to get all active techniques enabled.
+/// Pass `--no-X` CLI flags to disable individual techniques for debugging.
+#[derive(Debug, Clone)]
+pub struct CompilerOptions {
+    /// Enable pattern deduplication (default: true).
+    pub dedup: bool,
+    /// Enable idle-frame RLE (default: false until implemented).
+    pub rle: bool,
+    /// Enable variable-length mask (default: false until implemented).
+    pub varlen_mask: bool,
+}
+
+impl Default for CompilerOptions {
+    fn default() -> Self {
+        Self {
+            dedup: true,
+            rle: true,
+            varlen_mask: false,
+        }
+    }
+}
+
+/// Computes the YSG features byte from compiler options.
+/// Bit 0 = RLE enabled, bit 1 = variable-length mask enabled.
+fn features_byte(options: &CompilerOptions) -> u8 {
+    let mut f = 0u8;
+    if options.rle {
+        f |= 0x01;
+    }
+    if options.varlen_mask {
+        f |= 0x02;
+    }
+    f
 }
 
 /// Platform-agnostic delta-mask compiler for YM-2149 register updates.
@@ -92,24 +127,24 @@ impl DeltaCompiler {
         &self,
         sequence: &YmSequence,
         level: CompressionLevel,
+        options: &CompilerOptions,
     ) -> Result<YmSongDetails, Box<dyn std::error::Error>> {
-        if level == CompressionLevel::DeltaOnly || level == CompressionLevel::None {
-            return self.compile_song_no_dedup(sequence, level);
+        let use_dedup = options.dedup
+            && level != CompressionLevel::DeltaOnly
+            && level != CompressionLevel::None;
+
+        if !use_dedup {
+            return self.compile_song_no_dedup(sequence, level, options);
         }
 
-        if level == CompressionLevel::Lz {
-            let base = self.compile_song_full(sequence)?;
-            let compressed = Self::upkr_pack(&base.bytes);
-            return Ok(YmSongDetails { bytes: compressed, pattern_size: base.pattern_size });
-        }
-
-        self.compile_song_full(sequence)
+        self.compile_song_full(sequence, options)
     }
 
     /// Full delta + dedup compression, searching for the best pattern size.
     fn compile_song_full(
         &self,
         sequence: &YmSequence,
+        options: &CompilerOptions,
     ) -> Result<YmSongDetails, Box<dyn std::error::Error>> {
         let mut best_data: Option<Vec<u8>> = None;
         let mut best_size = 64;
@@ -117,7 +152,7 @@ impl DeltaCompiler {
         let candidate_sizes = Self::candidate_pattern_sizes(sequence.frames.len());
 
         for size in candidate_sizes {
-            if let Some(data) = self.compile_song_with_size(sequence, size) {
+            if let Some(data) = self.compile_song_with_size(sequence, size, options) {
                 if best_data.as_ref().map_or(true, |b| data.len() < b.len()) {
                     best_data = Some(data);
                     best_size = size;
@@ -132,30 +167,10 @@ impl DeltaCompiler {
             )
         })?;
 
-        Ok(YmSongDetails { bytes, pattern_size: best_size })
-    }
-
-    /// Wraps YSG bytes with upkr compression and a YZLZ magic header.
-    fn upkr_pack(ysg_bytes: &[u8]) -> Vec<u8> {
-        let config = upkr::Config::default();
-        let compressed = upkr::pack(ysg_bytes, 5, &config, None);
-        let uncompressed_len = ysg_bytes.len() as u32;
-        let mut out = Vec::with_capacity(8 + compressed.len());
-        out.extend_from_slice(&UPKR_MAGIC);
-        out.extend_from_slice(&uncompressed_len.to_le_bytes());
-        out.extend_from_slice(&compressed);
-        out
-    }
-
-    /// Decompresses a upkr-wrapped YSG payload back to raw YSG bytes.
-    pub fn upkr_unpack(bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        if bytes.len() < 8 || bytes[0..4] != UPKR_MAGIC {
-            return Err("Not a YZLZ compressed file".into());
-        }
-        let uncompressed_len = u32::from_le_bytes(bytes[4..8].try_into()?) as usize;
-        let config = upkr::Config::default();
-        upkr::unpack(&bytes[8..], &config, uncompressed_len)
-            .map_err(|e| format!("upkr decompress failed: {:?}", e).into())
+        Ok(YmSongDetails {
+            bytes,
+            pattern_size: best_size,
+        })
     }
 
     /// Compiles without deduplication: every block is a unique pattern.
@@ -165,6 +180,7 @@ impl DeltaCompiler {
         &self,
         sequence: &YmSequence,
         level: CompressionLevel,
+        options: &CompilerOptions,
     ) -> Result<YmSongDetails, Box<dyn std::error::Error>> {
         // Pick the largest pattern size that keeps the sequence table within 255 entries.
         let total_frames = sequence.frames.len();
@@ -176,10 +192,11 @@ impl DeltaCompiler {
                 continue;
             }
 
+            let last_pat_frames = (total_frames % size) as u8;
             let raw_blocks = Self::chunk_frames_into_patterns(&sequence.frames, size);
             let unique_patterns: Vec<Vec<u8>> = raw_blocks
                 .iter()
-                .map(|block| Self::serialize_ym_block_with_level(block, level))
+                .map(|block| Self::serialize_ym_block_with_level(block, level, options))
                 .collect();
 
             // Sequence table = 0, 1, 2, … (no dedup — every block is unique)
@@ -192,6 +209,8 @@ impl DeltaCompiler {
                 sequence_table.len(),
                 loop_pattern,
                 &sequence.timing,
+                last_pat_frames,
+                features_byte(options),
             );
             let offset_table = Self::build_pattern_offset_table(&unique_patterns);
             let bytes =
@@ -204,7 +223,10 @@ impl DeltaCompiler {
         }
 
         let (bytes, pattern_size) = best.ok_or("Song too long to compile without dedup")?;
-        Ok(YmSongDetails { bytes, pattern_size })
+        Ok(YmSongDetails {
+            bytes,
+            pattern_size,
+        })
     }
 
     /// Attempts to compile `sequence` using a fixed `pattern_size`; returns `None` if the
@@ -213,18 +235,23 @@ impl DeltaCompiler {
         &self,
         sequence: &YmSequence,
         pattern_size: usize,
+        options: &CompilerOptions,
     ) -> Option<Vec<u8>> {
         if sequence.frames.is_empty() {
             return Some(Vec::new());
         }
 
+        let total_frames = sequence.frames.len();
+        let last_pat_frames = (total_frames % pattern_size) as u8;
+
         // Chunk & serialize frames into pattern bytes
-        let serialized_blocks = Self::serialize_pattern_blocks(&sequence.frames, pattern_size)?;
+        let serialized_blocks =
+            Self::serialize_pattern_blocks(&sequence.frames, pattern_size, options)?;
 
         // Deduplicate pattern blocks into unique table & sequence array
         let (unique_patterns, sequence_table) = Self::deduplicate_patterns(serialized_blocks)?;
 
-        // Resolve loop index, 12-byte header, and 32-bit offset table
+        // Resolve loop index, 14-byte header, and 32-bit offset table
         let loop_pattern =
             Self::calculate_loop_pattern(sequence.loop_start, pattern_size, sequence_table.len());
         let header = Self::build_ysg_header(
@@ -233,6 +260,8 @@ impl DeltaCompiler {
             sequence_table.len(),
             loop_pattern,
             &sequence.timing,
+            last_pat_frames,
+            features_byte(options),
         );
         let offset_table = Self::build_pattern_offset_table(&unique_patterns);
 
@@ -284,13 +313,15 @@ impl DeltaCompiler {
         }
     }
 
-    /// Builds the fixed 12-byte YSG header.
+    /// Builds the 14-byte YSG header.
     fn build_ysg_header(
         pattern_size: usize,
         num_unique: usize,
         seq_len: usize,
         loop_pattern: u8,
         timing: &crate::timing::TimingConfig,
+        last_pat_frames: u8,
+        features: u8,
     ) -> Vec<u8> {
         let mut header = vec![
             pattern_size as u8,
@@ -300,6 +331,8 @@ impl DeltaCompiler {
         ];
         header.extend(timing.frame_rate.hz_value().to_le_bytes());
         header.extend(timing.master_clock_hz.to_le_bytes());
+        header.push(last_pat_frames);
+        header.push(features);
         header
     }
 
@@ -360,6 +393,7 @@ impl DeltaCompiler {
     fn serialize_pattern_blocks(
         frames: &[crate::sequence::YmFrame],
         pattern_size: usize,
+        options: &CompilerOptions,
     ) -> Option<Vec<Vec<u8>>> {
         let raw_blocks = Self::chunk_frames_into_patterns(frames, pattern_size);
         if raw_blocks.len() > 255 {
@@ -369,32 +403,93 @@ impl DeltaCompiler {
         Some(
             raw_blocks
                 .iter()
-                .map(|block| Self::serialize_ym_block_with_level(block, CompressionLevel::Full))
+                .map(|block| {
+                    Self::serialize_ym_block_with_level(block, CompressionLevel::Full, options)
+                })
                 .collect(),
         )
     }
 
-    /// Chunks a sequence of frames into blocks of `pattern_size`, padding the final block with default frames.
+    /// Chunks a sequence of frames into blocks of `pattern_size`, padding the final block with silence frames.
     fn chunk_frames_into_patterns(
         frames: &[crate::sequence::YmFrame],
         pattern_size: usize,
     ) -> Vec<Vec<crate::sequence::YmFrame>> {
-        frames
+        let mut chunks: Vec<Vec<crate::sequence::YmFrame>> = frames
             .chunks(pattern_size)
-            .map(|chunk| {
-                let mut block = chunk.to_vec();
-                block.resize(pattern_size, crate::sequence::YmFrame::default());
-                block
-            })
-            .collect()
+            .map(|chunk| chunk.to_vec())
+            .collect();
+
+        if let Some(last) = chunks.last_mut() {
+            if last.len() < pattern_size {
+                // Pad with silence (volumes = 0) rather than inheriting the last real
+                // frame's state. Without this, a loud noise frame at the song's end
+                // freezes on hardware for the entire padding duration before the loop.
+                let silence = crate::sequence::YmFrame {
+                    volume_a: Some(0),
+                    volume_b: Some(0),
+                    volume_c: Some(0),
+                    ..Default::default()
+                };
+                last.resize(pattern_size, silence);
+            }
+        }
+
+        chunks
     }
 
-    /// Serializes a block of frames to binary using the given compression level.
+    /// Serializes a block of frames to binary: compute deltas, apply optional passes, emit bytes.
     fn serialize_ym_block_with_level(
         frames: &[crate::sequence::YmFrame],
         level: CompressionLevel,
+        options: &CompilerOptions,
     ) -> Vec<u8> {
-        let mut data = Vec::new();
+        let deltas = Self::compute_frame_deltas(frames, level);
+        let deltas = if options.rle {
+            Self::apply_rle(deltas)
+        } else {
+            deltas
+        };
+        // variable-length mask pass slots in here when implemented
+        Self::emit_frame_bytes(&deltas)
+    }
+
+    /// Collapses runs of idle frames (mask == 0x0000) into 3-byte RLE tokens.
+    /// Token format: [0x00, 0x80, N] — represents N+1 consecutive idle frames.
+    /// Only emitted for runs of 2 or more (single idle frames are cheaper unencoded).
+    fn apply_rle(deltas: Vec<(u16, Vec<u8>)>) -> Vec<(u16, Vec<u8>)> {
+        let mut result = Vec::with_capacity(deltas.len());
+        let mut i = 0;
+
+        while i < deltas.len() {
+            let (mask, ref payload) = deltas[i];
+            if mask == 0x0000 {
+                let mut run = 1usize;
+                while i + run < deltas.len() && deltas[i + run].0 == 0x0000 {
+                    run += 1;
+                }
+                if run >= 2 {
+                    // N = run - 1 additional frames beyond the first
+                    result.push((RLE_FLAG, vec![(run - 1) as u8]));
+                } else {
+                    result.push((mask, payload.clone()));
+                }
+                i += run;
+            } else {
+                result.push((mask, payload.clone()));
+                i += 1;
+            }
+        }
+
+        result
+    }
+
+    /// Step 1 — convert frames to (mask, payload) pairs using delta encoding.
+    fn compute_frame_deltas(
+        frames: &[crate::sequence::YmFrame],
+        level: CompressionLevel,
+    ) -> Vec<(u16, Vec<u8>)> {
+        let mut deltas = Vec::with_capacity(frames.len());
         let mut registers = [0u8; 14];
         registers[7] = 0x3F; // Match playback's initial mixer state: all channels muted
 
@@ -412,18 +507,26 @@ impl DeltaCompiler {
                     }
                     (m, p)
                 }
-                CompressionLevel::Full | CompressionLevel::DeltaOnly | CompressionLevel::Lz => {
+                CompressionLevel::Full | CompressionLevel::DeltaOnly => {
                     Self::encode_frame_delta(&new_registers, &registers, idx == 0)
                 }
             };
 
             registers = new_registers;
+            deltas.push((mask, payload));
+        }
 
+        deltas
+    }
+
+    /// Final step — write (mask, payload) pairs to bytes.
+    fn emit_frame_bytes(deltas: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for (mask, payload) in deltas {
             data.push((mask & 0xFF) as u8);
             data.push(((mask >> 8) & 0xFF) as u8);
             data.extend(payload);
         }
-
         data
     }
 
@@ -457,29 +560,59 @@ impl DeltaCompiler {
         // Mixer R7 (0 is ENABLED, 1 is DISABLED) — only modify bits that are specified
         let mut mixer = prev_registers[7];
         if let Some(en) = frame.tone_enable_a {
-            if en { mixer &= !0x01; } else { mixer |= 0x01; }
+            if en {
+                mixer &= !0x01;
+            } else {
+                mixer |= 0x01;
+            }
         }
         if let Some(en) = frame.tone_enable_b {
-            if en { mixer &= !0x02; } else { mixer |= 0x02; }
+            if en {
+                mixer &= !0x02;
+            } else {
+                mixer |= 0x02;
+            }
         }
         if let Some(en) = frame.tone_enable_c {
-            if en { mixer &= !0x04; } else { mixer |= 0x04; }
+            if en {
+                mixer &= !0x04;
+            } else {
+                mixer |= 0x04;
+            }
         }
         if let Some(en) = frame.noise_enable_a {
-            if en { mixer &= !0x08; } else { mixer |= 0x08; }
+            if en {
+                mixer &= !0x08;
+            } else {
+                mixer |= 0x08;
+            }
         }
         if let Some(en) = frame.noise_enable_b {
-            if en { mixer &= !0x10; } else { mixer |= 0x10; }
+            if en {
+                mixer &= !0x10;
+            } else {
+                mixer |= 0x10;
+            }
         }
         if let Some(en) = frame.noise_enable_c {
-            if en { mixer &= !0x20; } else { mixer |= 0x20; }
+            if en {
+                mixer &= !0x20;
+            } else {
+                mixer |= 0x20;
+            }
         }
         regs[7] = mixer;
 
         // Volumes R8, R9, R10
-        if let Some(vol) = frame.volume_a { regs[8] = vol & 0x1F; }
-        if let Some(vol) = frame.volume_b { regs[9] = vol & 0x1F; }
-        if let Some(vol) = frame.volume_c { regs[10] = vol & 0x1F; }
+        if let Some(vol) = frame.volume_a {
+            regs[8] = vol & 0x1F;
+        }
+        if let Some(vol) = frame.volume_b {
+            regs[9] = vol & 0x1F;
+        }
+        if let Some(vol) = frame.volume_c {
+            regs[10] = vol & 0x1F;
+        }
 
         // Envelopes R11, R12
         if let Some(env_period) = frame.envelope_period {
