@@ -3,9 +3,9 @@
 # Usage: make -k all    (build all songs, skip failures)
 
 BUILD_DIR    := build
-YM_DIR       ?= ../../tests/fixtures/song
-YM_SONG      ?= ../../target/release/ym-song
-A78GEN       ?= ../../target/release/a78gen
+YM_DIR       ?= ../../../tests/fixtures/song
+LYM          ?= ../../../target/release/lym
+A78GEN       ?= ../../../target/release/a78gen
 CA65         := ca65
 LD65         := ld65
 CA65_FLAGS   := -I.
@@ -38,7 +38,7 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  YM_DIR=path           Source directory for .ym files (default: ../../tests/fixtures/song)"
-	@echo "  YM_SONG=path          Path to ym-song binary (default: ../../target/release/ym-song)"
+	@echo "  LYM=path              Path to lym binary (default: ../../target/release/lym)"
 	@echo "  A78GEN=path           Path to a78gen binary (default: ../../target/release/a78gen)"
 	@echo "  YSG_MAX_BYTES=N       Truncate songs longer than N bytes (default: 28672)"
 
@@ -49,12 +49,12 @@ $(BUILD_DIR):
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(YM_SONG) render --input $< --output $@ --compression full --max-bytes $(YSG_MAX_BYTES) \
+	@$(LYM) song render --input $< --output $@ --compression full --max-bytes $(YSG_MAX_BYTES) \
 		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(YM_SONG) render --input $< --output $@ --compression full --max-bytes $(YSG_MAX_BYTES) \
+	@$(LYM) song render --input $< --output $@ --compression full --max-bytes $(YSG_MAX_BYTES) \
 		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
 
 # --- Assemble player once — music_data is imported from the per-song music module ---

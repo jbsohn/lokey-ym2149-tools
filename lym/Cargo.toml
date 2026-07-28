@@ -1,5 +1,5 @@
 [package]
-name = "ym-sfx"
+name = "lym"
 version.workspace = true
 edition.workspace = true
 
@@ -8,3 +8,6 @@ ym-core = { path = "../ym-core" }
 serde_json.workspace = true
 clap.workspace = true
 console.workspace = true
+indicatif.workspace = true
+cpal.workspace = true
+ym2149.workspace = true

@@ -163,7 +163,7 @@ impl YmSequence {
                     "Sequence index {} out of range (max {})",
                     pattern_idx, header.num_unique
                 )
-                .into());
+                    .into());
             }
             let start_ptr = pattern_data_start + offsets[pattern_idx];
             if start_ptr >= bytes.len() {
@@ -258,9 +258,9 @@ impl YmSequence {
         reg_14[1] &= 0x0F; // R1 bits 4-7 unused
         reg_14[3] &= 0x0F; // R3 bits 4-7 unused
         reg_14[5] &= 0x0F; // R5 bits 4-7 unused
-                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
-                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
-                           // chip — silence those channels to prevent false envelope-mode triggering.
+        // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
+        // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
+        // chip — silence those channels to prevent false envelope-mode triggering.
         let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
         if reg_14[8] > 0x1F {
             reg_14[8] = 0;
@@ -453,6 +453,36 @@ impl YmSequence {
     pub fn ym_decompressed_len(ym_data: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
         use ym2149_ym_replayer::decompress_if_needed;
         Ok(decompress_if_needed(ym_data)?.len())
+    }
+
+    /// Loads a YmSequence from a file path (.ysg, .ym, or .json).
+    pub fn load_from_path(
+        input: &std::path::Path,
+        clock_override: Option<u32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+
+        match extension {
+            "ysg" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_ysg(name, &bytes)
+            }
+            "json" => {
+                let content = std::fs::read_to_string(input)?;
+                Ok(serde_json::from_str(&content)?)
+            }
+            "ym" => {
+                let bytes = std::fs::read(input)?;
+                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override)?;
+                Ok(seq)
+            }
+            _ => Err(format!(
+                "Unsupported song file extension '.{}'. Expected .ysg, .ym, or .json",
+                extension
+            )
+                .into()),
+        }
     }
 }
 
@@ -718,7 +748,7 @@ impl SfxSequence {
                     line_num + 1,
                     parts.len()
                 )
-                .into());
+                    .into());
             }
 
             let t = parts[0].parse::<i32>()? != 0;
@@ -951,5 +981,91 @@ impl SfxSequence {
         }
 
         frames
+    }
+
+    /// Loads a single SfxSequence from a file path (.yfx, .json, .csv, .afx, or .afb).
+    pub fn load_from_path(
+        input: &std::path::Path,
+        bank_index: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("sfx");
+
+        match extension {
+            "csv" => {
+                let content = std::fs::read_to_string(input)?;
+                Self::from_ayfx_csv(name, &content)
+            }
+            "afb" => {
+                let bytes = std::fs::read(input)?;
+                let bank = Self::from_ayfx_bank(&bytes)?;
+                if bank.is_empty() {
+                    return Err("AYFX bank contains no sound effects".into());
+                }
+                let idx = bank_index.min(bank.len() - 1);
+                Ok(bank[idx].clone())
+            }
+            "afx" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_ayfx_effect(name, &bytes)
+            }
+            "yfx" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_yfx(name, &bytes)
+            }
+            "json" => {
+                let content = std::fs::read_to_string(input)?;
+                Ok(serde_json::from_str(&content)?)
+            }
+            _ => Err(format!(
+                "Unsupported SFX file extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
+                extension
+            )
+                .into()),
+        }
+    }
+
+    /// Loads all SfxSequences from a list of file paths.
+    pub fn load_all_from_paths(
+        inputs: &[std::path::PathBuf],
+    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+        let mut sequences = Vec::new();
+        for input in inputs {
+            let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("sfx");
+
+            match extension {
+                "csv" => {
+                    let content = std::fs::read_to_string(input)?;
+                    sequences.push(Self::from_ayfx_csv(name, &content)?);
+                }
+                "afb" => {
+                    let bytes = std::fs::read(input)?;
+                    let bank = Self::from_ayfx_bank(&bytes)?;
+                    sequences.extend(bank);
+                }
+                "afx" => {
+                    let bytes = std::fs::read(input)?;
+                    sequences.push(Self::from_ayfx_effect(name, &bytes)?);
+                }
+                "yfx" => {
+                    let bytes = std::fs::read(input)?;
+                    sequences.push(Self::from_yfx(name, &bytes)?);
+                }
+                "json" => {
+                    let content = std::fs::read_to_string(input)?;
+                    sequences.push(serde_json::from_str(&content)?);
+                }
+                _ => return Err(format!(
+                    "Unsupported SFX extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
+                    extension
+                )
+                    .into()),
+            }
+        }
+        if sequences.is_empty() {
+            return Err("No sound effects were loaded.".into());
+        }
+        Ok(sequences)
     }
 }

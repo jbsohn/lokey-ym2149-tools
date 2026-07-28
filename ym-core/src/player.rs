@@ -41,17 +41,11 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
 /// Spawns a background thread reading raw key presses and forwarding them over a channel.
 /// `Term::read_key()` blocks, so this thread outlives a single playback session; it exits
 /// once its channel receiver is dropped and the next keypress fails to send.
-///
-/// Ctrl+C is special-cased: raw mode disables the terminal's normal INTR handling, so
-/// without this the usual "Ctrl+C stops playback" behavior would silently stop working.
-fn spawn_key_listener() -> mpsc::Receiver<Key> {
+pub fn spawn_key_listener() -> mpsc::Receiver<Key> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let term = Term::stdout();
         while let Ok(key) = term.read_key() {
-            if matches!(key, Key::CtrlC | Key::Char('\u{3}')) {
-                std::process::exit(130);
-            }
             if tx.send(key).is_err() {
                 break;
             }
@@ -466,15 +460,17 @@ impl AudioPlayer {
         // `read_key()` on a non-tty stdout returns `Ok(Key::Unknown)` immediately rather than
         // blocking, so only enable the listener thread when actually attached to a terminal —
         // otherwise it would spin at 100% CPU.
-        let interactive = seek.is_some() && Term::stdout().is_term();
+        let interactive = Term::stdout().is_term();
 
         let mut hints = Vec::new();
-        if interactive {
+        if seek.is_some() {
             hints.push("\u{2190}/\u{2192} to seek".to_string());
         }
         if is_looping {
-            hints.push("looping, Ctrl+C to stop".to_string());
+            hints.push("looping".to_string());
         }
+        hints.push("'q' to quit".to_string());
+
         if !hints.is_empty() {
             pb.set_message(format!(
                 " {}",
@@ -485,12 +481,23 @@ impl AudioPlayer {
         let key_rx = interactive.then(spawn_key_listener);
 
         loop {
-            if let (Some(rx), Some((seek_fn, step))) = (&key_rx, &seek) {
+            if let Some(rx) = &key_rx {
                 while let Ok(key) = rx.try_recv() {
                     let current = progress.current_frame.load(Ordering::Relaxed);
                     match key {
-                        Key::ArrowRight => seek_fn(current.saturating_add(*step)),
-                        Key::ArrowLeft => seek_fn(current.saturating_sub(*step)),
+                        Key::ArrowRight => {
+                            if let Some((seek_fn, step)) = &seek {
+                                seek_fn(current.saturating_add(*step));
+                            }
+                        }
+                        Key::ArrowLeft => {
+                            if let Some((seek_fn, step)) = &seek {
+                                seek_fn(current.saturating_sub(*step));
+                            }
+                        }
+                        Key::Char('q') | Key::Char('Q') => {
+                            progress.finished.store(true, Ordering::Relaxed);
+                        }
                         _ => {}
                     }
                 }

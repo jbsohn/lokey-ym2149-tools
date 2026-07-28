@@ -2,7 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "YmSound YAML Specification",
   "type": "object",
-  "required": ["name", "sourceClock", "sourceHz", "priority", "frames"],
+  "required": [
+    "name",
+    "sourceClock",
+    "sourceHz",
+    "priority",
+    "frames"
+  ],
   "properties": {
     "name": {
       "type": "string",
@@ -15,7 +21,10 @@
     },
     "sourceHz": {
       "type": "integer",
-      "enum": [50, 60],
+      "enum": [
+        50,
+        60
+      ],
       "description": "Original playback tick rate in Hz."
     },
     "priority": {
@@ -28,12 +37,19 @@
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["A", "B", "C"]
+        "enum": [
+          "A",
+          "B",
+          "C"
+        ]
       },
       "description": "Preferred YM2149 channels to play this sound effect on."
     },
     "loopStart": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "minimum": 0,
       "description": "Zero-indexed frame to loop back to. Null or omitted for one-shot."
     },
