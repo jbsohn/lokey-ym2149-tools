@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use console::style;
 use std::fs;
 use std::path::PathBuf;
@@ -16,47 +16,41 @@ struct SfxCli {
     command: SfxCommands,
 }
 
+/// Arguments shared by every SFX subcommand that loads a source file.
+#[derive(Args, Debug)]
+struct SfxCommonArgs {
+    /// Input source file path (.json, .csv, .afx, .afb, .yfx) or compiled .yfx binary path
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Timing refresh rate override (50 or 60 Hz)
+    #[arg(long, value_enum)]
+    hz: Option<HzOption>,
+
+    /// Source chip clock in Hz. Defaults to 1773400 (ZX Spectrum) for AYFX formats. Override if your source uses a different clock.
+    #[arg(long)]
+    clock: Option<u32>,
+
+    /// Effect index within an .afb bank file (0-based, default 0)
+    #[arg(long, default_value_t = 0)]
+    index: usize,
+}
+
 #[derive(Subcommand, Debug)]
 enum SfxCommands {
     /// Render a sound effect source file into compiled YM-2149 binary payload
     Render {
-        /// Input source file path (.json, .csv, .afx, .afb, .yfx)
-        #[arg(short, long)]
-        input: PathBuf,
+        #[command(flatten)]
+        common: SfxCommonArgs,
 
         /// Output compiled binary file path (.yfx)
         #[arg(short, long)]
         output: Option<PathBuf>,
-
-        /// Timing refresh rate override (50 or 60 Hz)
-        #[arg(long, value_enum)]
-        hz: Option<HzOption>,
-
-        /// Source chip clock in Hz. Defaults to 1773400 (ZX Spectrum) for AYFX formats. Override if your source uses a different clock.
-        #[arg(long)]
-        clock: Option<u32>,
-
-        /// Effect index within an .afb bank file (0-based, default 0)
-        #[arg(long, default_value_t = 0)]
-        index: usize,
     },
     /// Audition and play a sound effect sequence
     Play {
-        /// Input source file path or compiled binary path
-        #[arg(short, long)]
-        input: PathBuf,
-
-        /// Timing refresh rate override (50 or 60 Hz)
-        #[arg(long, value_enum)]
-        hz: Option<HzOption>,
-
-        /// Source chip clock in Hz. Defaults to 1773400 (ZX Spectrum) for AYFX formats. Override if your source uses a different clock.
-        #[arg(long)]
-        clock: Option<u32>,
-
-        /// Effect index within an .afb bank file (0-based, default 0)
-        #[arg(long, default_value_t = 0)]
-        index: usize,
+        #[command(flatten)]
+        common: SfxCommonArgs,
     },
 }
 
@@ -67,41 +61,46 @@ fn load_sfx_sequence(
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("sfx");
 
-    if extension == "csv" {
-        let content = fs::read_to_string(input)?;
-        SfxSequence::from_ayfx_csv(name, &content)
-    } else if extension == "afb" {
-        let bytes = fs::read(input)?;
-        let bank = SfxSequence::from_ayfx_bank(&bytes)?;
-        if bank.is_empty() {
-            return Err("AYFX bank contains no sound effects".into());
+    match extension {
+        "csv" => {
+            let content = fs::read_to_string(input)?;
+            SfxSequence::from_ayfx_csv(name, &content)
         }
-        if bank.len() > 1 {
-            println!(
-                "{} {} sound effects (use --index 0..{} to select, using {}).",
-                style("Loaded AYFX bank with").dim(),
-                style(bank.len()).bold(),
-                bank.len() - 1,
-                bank_index,
-            );
+        "afb" => {
+            let bytes = fs::read(input)?;
+            let bank = SfxSequence::from_ayfx_bank(&bytes)?;
+            if bank.is_empty() {
+                return Err("AYFX bank contains no sound effects".into());
+            }
+            if bank.len() > 1 {
+                println!(
+                    "{} {} sound effects (use --index 0..{} to select, using {}).",
+                    style("Loaded AYFX bank with").dim(),
+                    style(bank.len()).bold(),
+                    bank.len() - 1,
+                    bank_index,
+                );
+            }
+            let idx = bank_index.min(bank.len() - 1);
+            Ok(bank[idx].clone())
         }
-        let idx = bank_index.min(bank.len() - 1);
-        Ok(bank[idx].clone())
-    } else if extension == "afx" {
-        let bytes = fs::read(input)?;
-        SfxSequence::from_ayfx_effect(name, &bytes)
-    } else if extension == "yfx" {
-        let bytes = fs::read(input)?;
-        SfxSequence::from_yfx(name, &bytes)
-    } else if extension == "json" {
-        let content = fs::read_to_string(input)?;
-        Ok(serde_json::from_str(&content)?)
-    } else {
-        Err(format!(
+        "afx" => {
+            let bytes = fs::read(input)?;
+            SfxSequence::from_ayfx_effect(name, &bytes)
+        }
+        "yfx" => {
+            let bytes = fs::read(input)?;
+            SfxSequence::from_yfx(name, &bytes)
+        }
+        "json" => {
+            let content = fs::read_to_string(input)?;
+            Ok(serde_json::from_str(&content)?)
+        }
+        _ => Err(format!(
             "Unsupported file extension '.{}' for SFX source. Expected .csv, .afb, .afx, .yfx, or .json",
             extension
         )
-            .into())
+            .into()),
     }
 }
 
@@ -116,11 +115,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         SfxCommands::Render {
-            input,
+            common:
+                SfxCommonArgs {
+                    input,
+                    hz,
+                    clock,
+                    index,
+                },
             output,
-            hz,
-            clock,
-            index,
         } => {
             let output_path = output.unwrap_or_else(|| {
                 let mut path = input.clone();
@@ -181,10 +183,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         SfxCommands::Play {
-            input,
-            hz,
-            clock,
-            index,
+            common:
+                SfxCommonArgs {
+                    input,
+                    hz,
+                    clock,
+                    index,
+                },
         } => {
             let mut sequence = load_sfx_sequence(&input, index)?;
             apply_clock(&mut sequence, clock);

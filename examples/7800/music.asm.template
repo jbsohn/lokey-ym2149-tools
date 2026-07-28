@@ -1,0 +1,17 @@
+; ============================================================
+; music.asm -- Per-song data module for ysg_player
+;
+; Copy this file for each song, fill in the paths, then:
+;   ca65 music.asm -o music.o
+;   ld65 -C 7800.cfg player.o music.o -o game.bin
+;
+; Generated .ysi constants are scoped to the song name:
+;   songname::PLAYER_HZ, songname::YM_DELAY, etc.
+; Include the .ysi here if you need them at assemble time.
+; ============================================================
+
+.segment "RODATA"
+
+.export music_data
+music_data:
+    .incbin "song.ysg"

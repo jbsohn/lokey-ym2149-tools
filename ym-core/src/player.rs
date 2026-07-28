@@ -1,13 +1,22 @@
 use crate::sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
-use console::style;
+use console::{style, Key, Term};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use ym2149::{Ym2149, Ym2149Backend};
 
 pub struct AudioPlayer;
+
+/// How far a single arrow-key press seeks during interactive song playback.
+const SEEK_STEP_SECONDS: u32 = 5;
+
+/// Rebuilds absolute chip register state and jumps playback to `frame_idx`.
+/// Song frames are sparse diffs (see `YmFrame::apply_to_chip`), so seeking requires
+/// replaying every frame's register writes from the start — cheap, since it's just
+/// integer writes with no audio synthesis (no `chip.clock()`/`get_sample()` calls).
+pub type SeekFn = Arc<dyn Fn(usize) + Send + Sync>;
 
 /// Shared progress counters updated by audio thread and read lock-freely by UI thread.
 #[derive(Clone)]
@@ -27,6 +36,28 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
         .progress_chars("=>-"),
     );
     pb
+}
+
+/// Spawns a background thread reading raw key presses and forwarding them over a channel.
+/// `Term::read_key()` blocks, so this thread outlives a single playback session; it exits
+/// once its channel receiver is dropped and the next keypress fails to send.
+///
+/// Ctrl+C is special-cased: raw mode disables the terminal's normal INTR handling, so
+/// without this the usual "Ctrl+C stops playback" behavior would silently stop working.
+fn spawn_key_listener() -> mpsc::Receiver<Key> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let term = Term::stdout();
+        while let Ok(key) = term.read_key() {
+            if matches!(key, Key::CtrlC | Key::Char('\u{3}')) {
+                std::process::exit(130);
+            }
+            if tx.send(key).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 /// Progress bar styled for elapsed-time playback (raw `.ym` chiptune data, where no
@@ -103,7 +134,7 @@ impl AudioOutputSession {
     }
 }
 
-type StreamResult = Result<(cpal::Stream, PlaybackProgress), Box<dyn std::error::Error>>;
+type StreamResult = Result<(cpal::Stream, PlaybackProgress, SeekFn), Box<dyn std::error::Error>>;
 
 impl AudioPlayer {
     /// Builds and starts a cpal output stream that clocks `chip` and feeds it one
@@ -115,12 +146,15 @@ impl AudioPlayer {
         mut chip: Ym2149,
         frames: Arc<[F]>,
         loop_start: Option<usize>,
-        mut apply: Apply,
+        chip_clock_hz: u32,
+        apply: Apply,
     ) -> StreamResult
     where
         F: Send + Sync + 'static,
-        Apply: FnMut(&F, &mut Ym2149, &mut u8, &mut Option<u8>) + Send + 'static,
+        Apply: Fn(&F, &mut Ym2149, &mut u8, &mut Option<u8>) + Clone + Send + Sync + 'static,
     {
+        let chip_sample_rate = sink.stream_config.sample_rate;
+
         // Apply initial frame registers before the stream (and its callback) exist.
         let mut mixer = 0x3F; // Default: all tones & noise muted
         let mut last_env_shape = None;
@@ -141,6 +175,31 @@ impl AudioPlayer {
         let progress = PlaybackProgress {
             current_frame: Arc::new(AtomicUsize::new(0)),
             finished: Arc::new(AtomicBool::new(false)),
+        };
+
+        let seek: SeekFn = {
+            let seek_apply = apply.clone();
+            let seek_frames = Arc::clone(&frames);
+            let seek_state = Arc::clone(&state);
+            let seek_current_frame = Arc::clone(&progress.current_frame);
+            Arc::new(move |target_frame: usize| {
+                let target = target_frame.min(total_frames.saturating_sub(1));
+                let mut scratch_chip = Ym2149::with_clocks(chip_clock_hz, chip_sample_rate);
+                let mut mixer = 0x3F;
+                let mut last_env_shape = None;
+                for frame in seek_frames[..=target].iter() {
+                    seek_apply(frame, &mut scratch_chip, &mut mixer, &mut last_env_shape);
+                }
+
+                let mut s = seek_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.chip = scratch_chip;
+                s.frame_idx = target;
+                s.sample_in_frame = 0;
+                s.mixer = mixer;
+                s.last_env_shape = last_env_shape;
+                drop(s);
+                seek_current_frame.store(target, Ordering::Relaxed);
+            })
         };
 
         let state_cb = Arc::clone(&state);
@@ -216,7 +275,7 @@ impl AudioPlayer {
             _ => return Err("Unsupported audio sample format".into()),
         };
 
-        Ok((stream, progress))
+        Ok((stream, progress, seek))
     }
 
     /// Plays a compiled SFX sequence on the default audio device, blocking until playback finishes.
@@ -240,12 +299,13 @@ impl AudioPlayer {
             .and_then(|c| c.first().copied())
             .unwrap_or(YmChannel::A);
 
-        let (stream, progress) = Self::build_stream(
+        let (stream, progress, _seek) = Self::build_stream(
             audio.as_sink(),
             samples_per_frame,
             chip,
             frames,
             None,
+            sequence.source_clock,
             move |frame: &SfxFrame, chip, mixer, _| frame.apply_to_chip(chip, mixer, channel),
         )?;
 
@@ -260,7 +320,7 @@ impl AudioPlayer {
             channel
         );
 
-        Self::monitor_frame_progress(progress, total_frames, false)?;
+        Self::monitor_frame_progress(progress, total_frames, false, None)?;
         std::thread::sleep(Duration::from_millis(100)); // drain queued buffer
         Ok(())
     }
@@ -281,12 +341,13 @@ impl AudioPlayer {
         let total_frames = frames.len();
         let loop_start_val = sequence.loop_start;
 
-        let (stream, progress) = Self::build_stream(
+        let (stream, progress, seek) = Self::build_stream(
             audio.as_sink(),
             samples_per_frame,
             chip,
             frames,
             loop_start_val,
+            sequence.timing.master_clock_hz,
             |frame: &YmFrame, chip, mixer, last_env_shape| {
                 frame.apply_to_chip(chip, mixer, last_env_shape)
             },
@@ -302,7 +363,13 @@ impl AudioPlayer {
             hz
         );
 
-        Self::monitor_frame_progress(progress, total_frames, loop_start_val.is_some())?;
+        let seek_step_frames = ((hz as usize) * SEEK_STEP_SECONDS as usize).max(1);
+        Self::monitor_frame_progress(
+            progress,
+            total_frames,
+            loop_start_val.is_some(),
+            Some((seek, seek_step_frames)),
+        )?;
         if loop_start_val.is_none() {
             std::thread::sleep(Duration::from_millis(100)); // drain queued buffer
         }
@@ -387,17 +454,48 @@ impl AudioPlayer {
     }
 
     /// Monitors frame-based playback (SFX or Song) with a terminal progress bar lock-freely.
+    /// When `seek` is set, left/right arrow keys jump playback by the given number of frames.
     fn monitor_frame_progress(
         progress: PlaybackProgress,
         total_frames: usize,
         is_looping: bool,
+        seek: Option<(SeekFn, usize)>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let pb = frame_progress_bar(total_frames as u64);
+
+        // `read_key()` on a non-tty stdout returns `Ok(Key::Unknown)` immediately rather than
+        // blocking, so only enable the listener thread when actually attached to a terminal —
+        // otherwise it would spin at 100% CPU.
+        let interactive = seek.is_some() && Term::stdout().is_term();
+
+        let mut hints = Vec::new();
+        if interactive {
+            hints.push("\u{2190}/\u{2192} to seek".to_string());
+        }
         if is_looping {
-            pb.set_message(format!(" {}", style("(looping, Ctrl+C to stop)").yellow()));
+            hints.push("looping, Ctrl+C to stop".to_string());
+        }
+        if !hints.is_empty() {
+            pb.set_message(format!(
+                " {}",
+                style(format!("({})", hints.join(", "))).yellow()
+            ));
         }
 
+        let key_rx = interactive.then(spawn_key_listener);
+
         loop {
+            if let (Some(rx), Some((seek_fn, step))) = (&key_rx, &seek) {
+                while let Ok(key) = rx.try_recv() {
+                    let current = progress.current_frame.load(Ordering::Relaxed);
+                    match key {
+                        Key::ArrowRight => seek_fn(current.saturating_add(*step)),
+                        Key::ArrowLeft => seek_fn(current.saturating_sub(*step)),
+                        _ => {}
+                    }
+                }
+            }
+
             let current_frame = progress.current_frame.load(Ordering::Relaxed);
             let is_done = progress.finished.load(Ordering::Relaxed);
 
@@ -408,6 +506,14 @@ impl AudioPlayer {
             std::thread::sleep(Duration::from_millis(50));
         }
         pb.finish_and_clear();
+
+        // The key-listener thread reads via a blocking raw-mode syscall, so it may still be
+        // parked mid-read when we return here — leaving the terminal without echo/line-editing
+        // if nothing restores it. `stty sane` is a cheap, well-known fix for exactly this.
+        if key_rx.is_some() {
+            let _ = std::process::Command::new("stty").arg("sane").status();
+        }
+
         Ok(())
     }
 

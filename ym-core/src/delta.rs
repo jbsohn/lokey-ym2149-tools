@@ -25,7 +25,7 @@ pub struct CompilerOptions {
     /// Enable idle-frame RLE (default: false until implemented).
     pub rle: bool,
     /// Enable variable-length mask (default: false until implemented).
-    pub varlen_mask: bool,
+    pub varlength_mask: bool,
 }
 
 impl Default for CompilerOptions {
@@ -33,7 +33,7 @@ impl Default for CompilerOptions {
         Self {
             dedup: true,
             rle: true,
-            varlen_mask: false,
+            varlength_mask: false,
         }
     }
 }
@@ -45,7 +45,7 @@ fn features_byte(options: &CompilerOptions) -> u8 {
     if options.rle {
         f |= 0x01;
     }
-    if options.varlen_mask {
+    if options.varlength_mask {
         f |= 0x02;
     }
     f
@@ -153,7 +153,7 @@ impl DeltaCompiler {
 
         for size in candidate_sizes {
             if let Some(data) = self.compile_song_with_size(sequence, size, options) {
-                if best_data.as_ref().map_or(true, |b| data.len() < b.len()) {
+                if best_data.as_ref().is_none_or(|b| data.len() < b.len()) {
                     best_data = Some(data);
                     best_size = size;
                 }
@@ -216,7 +216,7 @@ impl DeltaCompiler {
             let bytes =
                 Self::assemble_ysg_payload(header, &sequence_table, &offset_table, unique_patterns);
 
-            if best.as_ref().map_or(true, |(b, _)| bytes.len() < b.len()) {
+            if best.as_ref().is_none_or(|(b, _)| bytes.len() < b.len()) {
                 best = Some((bytes, size));
             }
             break; // largest valid size is always best for no-dedup (fewer boundaries)

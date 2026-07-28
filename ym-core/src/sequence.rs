@@ -66,10 +66,7 @@ impl YmSequence {
             pattern_data_start,
             &sequence_table,
             &offsets,
-            header.num_unique,
-            header.pattern_size,
-            header.last_pat_frames,
-            header.features,
+            &header,
         )?;
 
         let loop_start = if header.loop_pattern == 255 {
@@ -143,10 +140,7 @@ impl YmSequence {
         let mut offsets = Vec::with_capacity(num_unique);
         for i in 0..num_unique {
             let ptr = start + i * 4;
-            let offset = bytes[ptr] as u32
-                | ((bytes[ptr + 1] as u32) << 8)
-                | ((bytes[ptr + 2] as u32) << 16)
-                | ((bytes[ptr + 3] as u32) << 24);
+            let offset = u32::from_le_bytes(bytes[ptr..ptr + 4].try_into()?);
             offsets.push(offset as usize);
         }
         Ok(offsets)
@@ -158,19 +152,16 @@ impl YmSequence {
         pattern_data_start: usize,
         sequence_table: &[usize],
         offsets: &[usize],
-        num_unique: usize,
-        pattern_size: usize,
-        last_pat_frames: usize,
-        features: u8,
+        header: &YsgHeader,
     ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
         let mut frames = Vec::new();
         let last_entry = sequence_table.len().saturating_sub(1);
 
         for (entry_idx, &pattern_idx) in sequence_table.iter().enumerate() {
-            if pattern_idx >= num_unique {
+            if pattern_idx >= header.num_unique {
                 return Err(format!(
                     "Sequence index {} out of range (max {})",
-                    pattern_idx, num_unique
+                    pattern_idx, header.num_unique
                 )
                 .into());
             }
@@ -178,16 +169,16 @@ impl YmSequence {
             if start_ptr >= bytes.len() {
                 return Err("YSG pattern offset out of bounds".into());
             }
-            let frames_to_decode = if entry_idx == last_entry && last_pat_frames > 0 {
-                last_pat_frames
+            let frames_to_decode = if entry_idx == last_entry && header.last_pat_frames > 0 {
+                header.last_pat_frames
             } else {
-                pattern_size
+                header.pattern_size
             };
             frames.extend(Self::decode_ysg_pattern(
                 bytes,
                 start_ptr,
                 frames_to_decode,
-                features,
+                header.features,
             )?);
         }
 
@@ -914,7 +905,7 @@ impl SfxSequence {
 
     /// Parses compiled .yfx binary data into an SfxSequence.
     pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() % 5 != 0 {
+        if !bytes.len().is_multiple_of(5) {
             return Err("YFX file size must be a multiple of 5".into());
         }
 

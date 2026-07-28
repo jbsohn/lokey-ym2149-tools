@@ -225,9 +225,9 @@ mod tests {
         }
         let song = YmSequence {
             name: "rle_test".to_string(),
-            timing: crate::timing::TimingConfig {
+            timing: TimingConfig {
                 master_clock_hz: ATARI_7800_CLOCK,
-                frame_rate: crate::timing::SystemHz::Hz50,
+                frame_rate: SystemHz::Hz50,
             },
             priority: 0,
             loop_start: None,
