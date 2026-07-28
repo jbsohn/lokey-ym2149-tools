@@ -4,7 +4,7 @@ pub mod sequence;
 pub mod timing;
 
 pub use delta::{CompilerOptions, CompressionLevel, DeltaCompiler, YmSongDetails, RLE_FLAG};
-pub use player::{AudioPlayer, spawn_key_listener};
+pub use player::{spawn_key_listener, AudioPlayer};
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
 pub use timing::{
     calculate_delay, HzOption, SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK,

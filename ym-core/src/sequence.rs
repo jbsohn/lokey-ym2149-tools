@@ -163,7 +163,7 @@ impl YmSequence {
                     "Sequence index {} out of range (max {})",
                     pattern_idx, header.num_unique
                 )
-                    .into());
+                .into());
             }
             let start_ptr = pattern_data_start + offsets[pattern_idx];
             if start_ptr >= bytes.len() {
@@ -258,9 +258,9 @@ impl YmSequence {
         reg_14[1] &= 0x0F; // R1 bits 4-7 unused
         reg_14[3] &= 0x0F; // R3 bits 4-7 unused
         reg_14[5] &= 0x0F; // R5 bits 4-7 unused
-        // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
-        // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
-        // chip — silence those channels to prevent false envelope-mode triggering.
+                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
+                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
+                           // chip — silence those channels to prevent false envelope-mode triggering.
         let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
         if reg_14[8] > 0x1F {
             reg_14[8] = 0;
@@ -481,7 +481,7 @@ impl YmSequence {
                 "Unsupported song file extension '.{}'. Expected .ysg, .ym, or .json",
                 extension
             )
-                .into()),
+            .into()),
         }
     }
 }
@@ -748,7 +748,7 @@ impl SfxSequence {
                     line_num + 1,
                     parts.len()
                 )
-                    .into());
+                .into());
             }
 
             let t = parts[0].parse::<i32>()? != 0;
@@ -1021,7 +1021,7 @@ impl SfxSequence {
                 "Unsupported SFX file extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
                 extension
             )
-                .into()),
+            .into()),
         }
     }
 
@@ -1056,11 +1056,13 @@ impl SfxSequence {
                     let content = std::fs::read_to_string(input)?;
                     sequences.push(serde_json::from_str(&content)?);
                 }
-                _ => return Err(format!(
+                _ => {
+                    return Err(format!(
                     "Unsupported SFX extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
                     extension
                 )
-                    .into()),
+                    .into())
+                }
             }
         }
         if sequences.is_empty() {
