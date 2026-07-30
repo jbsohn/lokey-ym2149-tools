@@ -1,9 +1,0 @@
-[package]
-name = "a78gen"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-clap.workspace = true
-serde.workspace = true
-serde_json.workspace = true

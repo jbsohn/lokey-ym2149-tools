@@ -5,7 +5,7 @@
 BUILD_DIR    := build
 YM_DIR       ?= ../../../tests/fixtures/song
 LYM          ?= ../../../target/release/lym
-A78GEN       ?= ../../../target/release/a78gen
+A78TOOL      ?= a78tool
 CA65         := ca65
 LD65         := ld65
 CA65_FLAGS   := -I.
@@ -39,7 +39,7 @@ help:
 	@echo "Variables:"
 	@echo "  YM_DIR=path           Source directory for .ym files (default: ../../tests/fixtures/song)"
 	@echo "  LYM=path              Path to lym binary (default: ../../target/release/lym)"
-	@echo "  A78GEN=path           Path to a78gen binary (default: ../../target/release/a78gen)"
+	@echo "  A78TOOL=path          Path to a78tool binary (default: a78tool)"
 	@echo "  YSG_MAX_BYTES=N       Truncate songs longer than N bytes (default: 28672)"
 
 $(BUILD_DIR):
@@ -94,7 +94,7 @@ $(BUILD_DIR)/%.rom: $(BUILD_DIR)/%.bin
 $(BUILD_DIR)/%.a78: $(BUILD_DIR)/%.rom
 	@if [ -s "$<" ]; then \
 		echo "  Packaging A78: $*"; \
-		$(A78GEN) --input "$<" --output "$@" --title "$*"; \
+		$(A78TOOL) --input "$<" --output "$@" --title "$*"; \
 	else \
 		touch $@; \
 	fi

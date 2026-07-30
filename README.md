@@ -9,7 +9,7 @@ targetting the Yamaha YM-2149 Programmable Sound Generator (PSG).
   frame structures, format decoders, and the real-time audio playback engine.
 - **`lym`**: The unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs
   and sound effects.
-- **`a78gen`**: Atari 7800 `.a78` ROM header generator CLI utility.
+- **`a78tool`**: Atari 7800 `.a78` ROM header utility (see [lokey-7800-tools](file:///home/john/Projects/lokey-7800-tools)).
 
 ---
 
