@@ -39,7 +39,7 @@ help:
 	@echo "Variables:"
 	@echo "  YM_DIR=path           Source directory for .ym files (default: ../../tests/fixtures/song)"
 	@echo "  LYM=path              Path to lym binary (default: ../../target/release/lym)"
-	@echo "  A78TOOL=path          Path to a78tool binary (default: ../../../../lokey-7800-tools/target/release/a78tool)"
+	@echo "  A78TOOL=path          Path to a78tool binary (default: a78tool)"
 	@echo "  YSG_MAX_BYTES=N       Truncate songs longer than N bytes (default: 28672)"
 
 $(BUILD_DIR):

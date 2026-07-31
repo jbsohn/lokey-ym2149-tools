@@ -1,8 +1,6 @@
 # Atari 7800 Music + SFX Proof-of-Concept Sample Makefile
 # Assembler: ca65 / ld65 (cc65 toolchain)
 
-export PATH := /Users/john/7800AsmDevKit:/Users/john/cc65/bin:$(PATH)
-
 BUILD_DIR    := build
 LYM          ?= ../../../target/release/lym
 A78TOOL      ?= a78tool
@@ -11,7 +9,7 @@ LD65         := ld65
 SIGN         := 7800sign
 
 SONG_SRC     := ../../../tests/fixtures/song/ND-Loader.ym
-SFX_SRC      := ../../../tests/fixtures/sfx/pew-x.yfx
+SFX_SRC      := ../../../tests/fixtures/sfx/pew-x.afb
 
 .PHONY: all clean help
 
@@ -27,7 +25,8 @@ $(BUILD_DIR)/song.ysg: $(SONG_SRC) | $(BUILD_DIR)
 
 # Copy/render sound effect payload
 $(BUILD_DIR)/pew-x.yfx: $(SFX_SRC) | $(BUILD_DIR)
-	@cp $(SFX_SRC) $(BUILD_DIR)/pew-x.yfx
+	@echo "  Rendering YFX sound effect..."
+	@$(LYM) sfx render --input $< --output $@ --index 0
 
 # Generate music data module assembly
 $(BUILD_DIR)/music.asm: $(BUILD_DIR)/song.ysg
