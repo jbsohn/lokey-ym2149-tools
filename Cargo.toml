@@ -1,5 +1,5 @@
 [workspace]
-members = ["ym-core", "a78gen", "lym"]
+members = ["ym-core", "lym"]
 resolver = "2"
 
 [workspace.package]

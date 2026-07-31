@@ -4,8 +4,8 @@
 export PATH := /Users/john/7800AsmDevKit:/Users/john/cc65/bin:$(PATH)
 
 BUILD_DIR    := build
-LYM          := ../../../target/release/lym
-A78GEN       := ../../../target/release/a78gen
+LYM          ?= ../../../target/release/lym
+A78TOOL      ?= a78tool
 CA65         := ca65
 LD65         := ld65
 SIGN         := 7800sign
@@ -55,7 +55,7 @@ $(BUILD_DIR)/sample.rom: $(BUILD_DIR)/sample.bin
 # Package .a78 emulator ROM header
 $(BUILD_DIR)/sample.a78: $(BUILD_DIR)/sample.rom
 	@echo "  Packaging A78 header..."
-	@$(A78GEN) --input "$<" --output "$@" --title "7800 Music & SFX Fire Demo"
+	@$(A78TOOL) --input "$<" --output "$@" --title "7800 Music & SFX Fire Demo"
 
 clean:
 	@rm -rf $(BUILD_DIR)
