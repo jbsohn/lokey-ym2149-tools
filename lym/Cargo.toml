@@ -2,6 +2,7 @@
 name = "lym"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 ym-core = { path = "../ym-core" }

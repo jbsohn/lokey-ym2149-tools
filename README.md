@@ -106,3 +106,11 @@ low-level emulation and chiptune parsing:
 
 We extend our deep gratitude to the authors of these crates for providing the cycle-accurate emulation engine that
 powers the real-time auditioning tools in this codebase.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+*Note: Test song fixtures included in `tests/fixtures/song/` remain the copyright of their respective original composers (see [Musical Credits & Test Assets](docs/Musicians.md)).*
