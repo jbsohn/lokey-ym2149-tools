@@ -11,13 +11,13 @@ The `lokey-ym-tools` SDK is built around a **workstation-first audio pre-product
 ### Supported Input Formats
 
 * **Music**:
-    * `.ym` (Atari ST YM5/YM6 register dumps) via `ym2149-ym-replayer`.
-    * `.json` (Hand-authored music sequence source files).
+  * `.ym` (Atari ST YM5/YM6 register dumps) via `ym2149-ym-replayer`.
+  * `.json` (Hand-authored music sequence source files).
 * **Sound Effects (SFX)**:
-    * `.json` (Hand-authored sequence source files).
-    * `.csv` (AYFXedit active-high columns visual export).
-    * `.afx` (Single AYFX binary effect file).
-    * `.afb` (Multi-effect binary sound bank).
+  * `.json` (Hand-authored sequence source files).
+  * `.csv` (AYFXedit active-high columns visual export).
+  * `.afx` (Single AYFX binary effect file).
+  * `.afb` (Multi-effect binary sound bank).
 
 ---
 
@@ -89,8 +89,8 @@ ensuring seamless resume when a sound effect ends.
 We have selected the following crates to form the core of our workspace:
 
 * **`ym2149-rs` (slippyex workspace)**: Modular chiptune emulation and parsing stack.
-    * `ym2149`: Core cycle-accurate PSG chip emulation.
-    * `ym2149-ym-replayer`: Decodes and plays legacy `.ym` files.
+  * `ym2149`: Core cycle-accurate PSG chip emulation.
+  * `ym2149-ym-replayer`: Decodes and plays `.ym` files.
 * **`cpal`**: Low-level cross-platform audio device stream provider.
 * **`serde` & `serde_json`**: For parsing hand-authored `.json` sound effect and song sequence sources.
 * **`csv`**: For parsing visual AYFX `.csv` files.
@@ -102,14 +102,14 @@ We have selected the following crates to form the core of our workspace:
 The core SDK workspace provides full implementation of sound effect and music toolchains across two primary feature suites:
 
 * **Milestone 1: `lym sfx` (Sound Effects Compiler & Player)** `[COMPLETED]`
-    * Parse JSON, AYFX `.csv`, binary `.afx`, and multi-effect bank `.afb` files.
-    * Real-time workstation audio playback previewer using the `ym2149` chip emulator core and `cpal` output streaming.
-    * Compile sound effects into optimized `.yfx` target binaries using the 5-byte fixed-width format and auto-generate `.yfi` ca65 include headers.
+  * Parse JSON, AYFX `.csv`, binary `.afx`, and multi-effect bank `.afb` files.
+  * Real-time workstation audio playback previewer using the `ym2149` chip emulator core and `cpal` output streaming.
+  * Compile sound effects into optimized `.yfx` target binaries using the 5-byte fixed-width format and auto-generate `.yfi` ca65 include headers.
 * **Milestone 2: `lym song` & `lym mix` (Music Compiler, Auditioning & Interactive Mixer)** `[COMPLETED]`
-    * Directly parse legacy `.ym` files (including LHA compressed sources) and `.ysg` streams.
-    * Apply compile-time pitch-scaling (Atari ST 2.0MHz $\rightarrow$ 7800 1.789773MHz) and temporal resampling/decimation (`--step`).
-    * Implement **Pattern-based Delta Masking**, RLE idle-run tokens, and sequence packing (`.ysg` and `.ysi` ca65 include headers).
-    * Real-time interactive multi-channel song & SFX keyboard mixer with 10 key slots (`1`–`9`, `0`, `SPACE`), polyphonic channel fallback, and arrow-key seeking (`←`/`→`).
+  * Directly parse `.ym` files (including LHA compressed sources) and `.ysg` streams.
+  * Apply compile-time pitch-scaling (Atari ST 2.0MHz $\rightarrow$ 7800 1.789773MHz) and temporal resampling/decimation (`--step`).
+  * Implement **Pattern-based Delta Masking**, RLE idle-run tokens, and sequence packing (`.ysg` and `.ysi` ca65 include headers).
+  * Real-time interactive multi-channel song & SFX keyboard mixer with 10 key slots (`1`–`9`, `0`, `SPACE`), polyphonic channel fallback, and arrow-key seeking (`←`/`→`).
 
 ---
 
@@ -119,16 +119,16 @@ If we have too much caffeine or find ourselves with excess spare time, here is t
 throw out the window if reality catches up with us:
 
 * **Software-in-the-Loop (SIL) Matrix Mode**:
-    * *The Idea*: Run the actual compiled 6502 replayer code inside a virtual `mos6502` CPU simulator on the
+  * *The Idea*: Run the actual compiled 6502 replayer code inside a virtual `mos6502` CPU simulator on the
       workstation. The Rust tool runs DASM/MADS in the background, loads the `.bin` into emulated RAM, intercepts memory
       writes to `$0800` / `$0801`, and plays them through the PC speakers.
-    * *Steps*:
+  * *Steps*:
         1. **Compile**: Rust harness runs DASM/MADS in the background.
         2. **Load**: loads target `.bin` and `.ysg`/`.yfx` assets into virtual `mos6502` RAM.
         3. **Bridge**: Simulates the 6502 CPU and redirects register writes to the emulated `ym2149` PSG core.
         4. **Preview**: Emulated YM PSG core outputs audio PCM samples to the PC speakers via `rodio`/`cpal`.
 * **6502 Assembly Unit Testing**:
-    * *The Idea*: Write standard Rust unit tests that load specific compiled 6502 subroutines (e.g., bit-unpacking,
+  * *The Idea*: Write standard Rust unit tests that load specific compiled 6502 subroutines (e.g., bit-unpacking,
       volume scaling, or pointer calculation) into `mos6502` memory. The test sets initial registers/RAM values, steps
       the CPU, and asserts that the resulting register states and memory locations match expected values.
-    * *Status*: A highly practical way to debug low-level assembly logic (off-by-ones, register clobbering) headlessly.
+  * *Status*: A highly practical way to debug low-level assembly logic (off-by-ones, register clobbering) headlessly.

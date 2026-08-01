@@ -49,6 +49,7 @@ Ensure you have the Rust toolchain installed. Since auditioning plays audio dire
 ### Usage
 
 #### 1. Song Workflow: Audition Source, Render, and Audition Target
+
 Audition the uncompressed 16-bit Atari ST source track, compile it into an optimized `.ysg` cartridge binary payload, and audition the compiled stream to verify audio parity:
 
 ```bash
@@ -63,6 +64,7 @@ cargo run --bin lym -- song play --input tests/fixtures/song/ND-Loader.ysg
 ```
 
 #### 2. Sound Effects Workflow: Audition Source, Render, and Audition Target
+
 Audition raw sound effect sources (`.json`, `.csv`, `.afx`, `.afb`), compile them into 5-byte fixed-width `.yfx` binaries, and audition the target payload:
 
 ```bash
@@ -77,6 +79,7 @@ cargo run --bin lym -- sfx play --input tests/fixtures/sfx/blip.yfx
 ```
 
 #### 3. Live Interactive Keyboard Mixer
+
 Jam out with song playback while firing sound effects in real time using your keyboard (`1`–`9`, `0`, `SPACE`) to test channel takeover and conflict arbitration:
 
 ```bash
@@ -102,7 +105,7 @@ low-level emulation and chiptune parsing:
 - **[`ym2149`](https://crates.io/crates/ym2149)**: Provides the cycle-accurate Yamaha YM-2149 PSG emulator core.
 - **[`ym2149-common`](https://crates.io/crates/ym2149-common)**: Outlines player traits and frequency helper types.
 - **[`ym2149-ym-replayer`](https://crates.io/crates/ym2149-ym-replayer)**: Performs loader, parser, and decompressed
-  vbl-sync playback logic for legacy Atari ST `.ym` music formats.
+  vbl-sync playback logic for Atari ST `.ym` music formats.
 
 We extend our deep gratitude to the authors of these crates for providing the cycle-accurate emulation engine that
 powers the real-time auditioning tools in this codebase.

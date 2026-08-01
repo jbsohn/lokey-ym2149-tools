@@ -18,7 +18,7 @@ This project views the **Atari ST** as a powerful **Creation System**. With deca
 high-fidelity music routines, it is a goldmine for audio production.
 
 The **Atari 7800** acts as the **Consumer** of these assets. By bridging the hardware gap with a YM2149 and our
-specialized toolchain, we allow the 7800 to "consume" the rich sonic legacy of the ST, effectively giving the 8-bit
+specialized toolchain, we allow the 7800 to "consume" the rich sonic of the ST, effectively giving the 8-bit
 console the voice of its 16-bit big brother.
 
 ## Future Potential

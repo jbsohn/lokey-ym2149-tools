@@ -73,7 +73,7 @@ The final block contains the compressed frame streams:
     1. **Mask (2 bytes)**: `0x00 0x80` — bit 15 set (`0x8000`), all register bits clear.
     2. **Count (1 byte)**: `N` — represents `N + 1` additional idle frames (total run = `N + 1`).
 
-    * The player reads the count byte, subtracts `N` from its remaining-frame counter, and returns without writing any
+  * The player reads the count byte, subtracts `N` from its remaining-frame counter, and returns without writing any
       registers.
 * **Pattern Independence**: The first frame of every pattern block is unconditionally encoded with a full `0x3FFF` mask
   (resetting all 14 registers), enabling $O (1)$ pattern seeking, looping, and clean SFX channel recovery.
@@ -121,11 +121,11 @@ Designed for hand-authoring and delta-encoded (omitted fields carry forward):
 Flag-encoded frame updates:
 
 * **Flag Byte**:
-    * **Bits 0–3**: Volume (`0–15`).
-    * **Bit 4**: Disable Tone (`1` = OFF, `0` = ON).
-    * **Bit 5**: Change Tone (if set, `2` bytes of LSB,MSB tone period follow).
-    * **Bit 6**: Change Noise (if set, `1` byte of noise period follows).
-    * **Bit 7**: Disable Noise (`1` = OFF, `0` = ON).
+  * **Bits 0–3**: Volume (`0–15`).
+  * **Bit 4**: Disable Tone (`1` = OFF, `0` = ON).
+  * **Bit 5**: Change Tone (if set, `2` bytes of LSB,MSB tone period follow).
+  * **Bit 6**: Change Noise (if set, `1` byte of noise period follows).
+  * **Bit 7**: Disable Noise (`1` = OFF, `0` = ON).
 * **End Marker**: Sequence starting with `0xD0` followed by a byte `>= 0x20` (typically `0xD0 0x20`).
 
 ### Target Output Format (`.yfx`)
@@ -173,7 +173,7 @@ When `lym song render` or `lym sfx render` compiles binary payloads, it automati
 
 ## 5. Unsupported YM Variants & Digi-Drum Handling
 
-Some legacy chiptune features in `.ym` files require special handling or are unsupported for single-chip register streaming:
+Some chiptune features in `.ym` files require special handling or are unsupported for single-chip register streaming:
 
 * **PCM Digi-Drums (YM6)**: High-frequency (4kHz–10kHz) 8-bit PCM samples embedded in Atari ST YM6 files write raw sample values to R8–R10. The compiler automatically detects and silences digi-drum frames to prevent envelope corruption on 8-bit CPUs while preserving 100% of pitched 3-channel music (square waves, white noise, hardware envelopes).
 * **`MIX1` (Stereo 2-Chip)**: A stereo format designed by Leonard/STSound that streams to two parallel YM2149 chips simultaneously (6 channels total). Unsupported on single YM2149 hardware.
