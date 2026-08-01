@@ -1,4 +1,4 @@
-use crate::timing::{SystemHz, TimingConfig};
+use crate::timing::{SystemHz, TimingConfig, ATARI_ST_CLOCK, ZX_SPECTRUM_CLOCK};
 use serde::{Deserialize, Serialize};
 
 /// High-level frame representation for YM-2149 sound sequence authoring.
@@ -34,233 +34,417 @@ pub struct YmSequence {
     pub frames: Vec<YmFrame>,
 }
 
+#[allow(dead_code)]
+struct YsgHeader {
+    pattern_size: usize,
+    num_unique: usize,
+    seq_len: usize,
+    loop_pattern: usize,
+    frame_rate_hz: u32,
+    master_clock_hz: u32,
+    last_pat_frames: usize,
+    features: u8,
+}
+
 impl YmSequence {
-    pub fn new(name: impl Into<String>, hz: SystemHz) -> Self {
-        Self {
-            name: name.into(),
+    /// Deserializes a compiled .ysg binary stream into a YmSequence.
+    pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        let header = Self::parse_ysg_header(bytes)?;
+
+        let seq_table_start = 14;
+        let offset_table_start = seq_table_start + header.seq_len;
+        let pattern_data_start = offset_table_start + header.num_unique * 4;
+
+        if bytes.len() < pattern_data_start {
+            return Err("YSG file truncated before pattern data".into());
+        }
+
+        let sequence_table = Self::parse_sequence_table(bytes, seq_table_start, header.seq_len)?;
+        let offsets = Self::parse_offset_table(bytes, offset_table_start, header.num_unique)?;
+        let frames = Self::decode_ysg_pattern_frames(
+            bytes,
+            pattern_data_start,
+            &sequence_table,
+            &offsets,
+            &header,
+        )?;
+
+        let loop_start = if header.loop_pattern == 255 {
+            None
+        } else {
+            Some(header.loop_pattern * header.pattern_size)
+        };
+
+        Ok(Self {
+            name: name.to_string(),
             timing: TimingConfig {
-                master_clock_hz: 2_000_000,
-                frame_rate: hz,
+                master_clock_hz: header.master_clock_hz,
+                frame_rate: SystemHz::Custom(header.frame_rate_hz),
             },
             priority: 0,
-            loop_start: None,
-            frames: Vec::new(),
-        }
+            loop_start,
+            frames,
+        })
     }
 
-    pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if bytes.len() < 12 {
+    /// Parses the 13-byte header from a YSG binary stream.
+    fn parse_ysg_header(bytes: &[u8]) -> Result<YsgHeader, Box<dyn std::error::Error>> {
+        if bytes.len() < 14 {
             return Err("YSG file too small to contain header".into());
         }
-
         let pattern_size = bytes[0] as usize;
         let num_unique = bytes[1] as usize;
         let seq_len = bytes[2] as usize;
         let loop_pattern = bytes[3] as usize;
         let frame_rate_hz = u32::from_le_bytes(bytes[4..8].try_into()?);
         let master_clock_hz = u32::from_le_bytes(bytes[8..12].try_into()?);
-
-        let seq_table_start = 12;
-        let offset_table_start = seq_table_start + seq_len;
-        let pattern_data_start = offset_table_start + num_unique * 4;
-
-        if bytes.len() < pattern_data_start {
-            return Err("YSG file truncated before pattern data".into());
-        }
-
-        // Read sequence table
-        let mut sequence_table = Vec::with_capacity(seq_len);
-        for i in 0..seq_len {
-            sequence_table.push(bytes[seq_table_start + i] as usize);
-        }
-
-        // Read offset table
-        let mut offsets = Vec::with_capacity(num_unique);
-        for i in 0..num_unique {
-            let ptr = offset_table_start + i * 4;
-            let offset = bytes[ptr] as u32
-                | ((bytes[ptr + 1] as u32) << 8)
-                | ((bytes[ptr + 2] as u32) << 16)
-                | ((bytes[ptr + 3] as u32) << 24);
-            offsets.push(offset as usize);
-        }
-
-        let mut frames = Vec::new();
-
-        // We reconstruct the linear frames
-        for &pattern_idx in &sequence_table {
-            if pattern_idx >= num_unique {
-                return Err(format!(
-                    "Sequence index {} out of range (max {})",
-                    pattern_idx, num_unique
-                )
-                .into());
-            }
-
-            let start_ptr = pattern_data_start + offsets[pattern_idx];
-            let mut pp = start_ptr;
-
-            let mut registers = [0u8; 14];
-
-            for _ in 0..pattern_size {
-                if pp + 1 >= bytes.len() {
-                    return Err("Unexpected EOF in YSG pattern data".into());
-                }
-                let mask = bytes[pp] as u16 | ((bytes[pp + 1] as u16) << 8);
-                pp += 2;
-
-                for (reg, slot) in registers.iter_mut().enumerate() {
-                    if (mask & (1 << reg)) != 0 {
-                        if pp >= bytes.len() {
-                            return Err("Unexpected EOF in YSG pattern register payload".into());
-                        }
-                        *slot = bytes[pp];
-                        pp += 1;
-                    }
-                }
-
-                let tone_a = registers[0] as u16 | ((registers[1] as u16) << 8);
-                let tone_b = registers[2] as u16 | ((registers[3] as u16) << 8);
-                let tone_c = registers[4] as u16 | ((registers[5] as u16) << 8);
-                let noise_period = registers[6];
-                let mixer = registers[7];
-                let volume_a = registers[8];
-                let volume_b = registers[9];
-                let volume_c = registers[10];
-                let env_period = registers[11] as u16 | ((registers[12] as u16) << 8);
-                let env_shape = registers[13];
-
-                frames.push(YmFrame {
-                    tone_a: Some(tone_a),
-                    tone_b: Some(tone_b),
-                    tone_c: Some(tone_c),
-                    noise_period: Some(noise_period),
-                    volume_a: Some(volume_a),
-                    volume_b: Some(volume_b),
-                    volume_c: Some(volume_c),
-                    tone_enable_a: Some((mixer & 0x01) == 0),
-                    tone_enable_b: Some((mixer & 0x02) == 0),
-                    tone_enable_c: Some((mixer & 0x04) == 0),
-                    noise_enable_a: Some((mixer & 0x08) == 0),
-                    noise_enable_b: Some((mixer & 0x10) == 0),
-                    noise_enable_c: Some((mixer & 0x20) == 0),
-                    envelope_period: Some(env_period),
-                    envelope_shape: Some(env_shape),
-                    duration: Some(1),
-                });
-            }
-        }
-
-        let loop_start = if loop_pattern == 255 {
-            None
-        } else {
-            Some(loop_pattern * pattern_size)
-        };
-
-        Ok(Self {
-            name: name.to_string(),
-            timing: TimingConfig {
-                master_clock_hz,
-                frame_rate: SystemHz::Custom(frame_rate_hz),
-            },
-            priority: 0,
-            loop_start,
-            frames,
+        let last_pat_frames = bytes[12] as usize;
+        let features = bytes[13];
+        Ok(YsgHeader {
+            pattern_size,
+            num_unique,
+            seq_len,
+            loop_pattern,
+            frame_rate_hz,
+            master_clock_hz,
+            last_pat_frames,
+            features,
         })
     }
 
-    pub fn from_ym_data(name: &str, ym_data: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Reads the sequence pattern index table.
+    fn parse_sequence_table(
+        bytes: &[u8],
+        start: usize,
+        seq_len: usize,
+    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+        if bytes.len() < start + seq_len {
+            return Err("YSG file truncated before sequence table end".into());
+        }
+        let mut sequence_table = Vec::with_capacity(seq_len);
+        for i in 0..seq_len {
+            sequence_table.push(bytes[start + i] as usize);
+        }
+        Ok(sequence_table)
+    }
+
+    /// Reads pattern byte offsets from the YSG header.
+    fn parse_offset_table(
+        bytes: &[u8],
+        start: usize,
+        num_unique: usize,
+    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+        if bytes.len() < start + num_unique * 4 {
+            return Err("YSG file truncated before offset table end".into());
+        }
+        let mut offsets = Vec::with_capacity(num_unique);
+        for i in 0..num_unique {
+            let ptr = start + i * 4;
+            let offset = u32::from_le_bytes(bytes[ptr..ptr + 4].try_into()?);
+            offsets.push(offset as usize);
+        }
+        Ok(offsets)
+    }
+
+    /// Decodes pattern register streams into frames by iterating the sequence table.
+    fn decode_ysg_pattern_frames(
+        bytes: &[u8],
+        pattern_data_start: usize,
+        sequence_table: &[usize],
+        offsets: &[usize],
+        header: &YsgHeader,
+    ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
+        let mut frames = Vec::new();
+        let last_entry = sequence_table.len().saturating_sub(1);
+
+        for (entry_idx, &pattern_idx) in sequence_table.iter().enumerate() {
+            if pattern_idx >= header.num_unique {
+                return Err(format!(
+                    "Sequence index {} out of range (max {})",
+                    pattern_idx, header.num_unique
+                )
+                .into());
+            }
+            let start_ptr = pattern_data_start + offsets[pattern_idx];
+            if start_ptr >= bytes.len() {
+                return Err("YSG pattern offset out of bounds".into());
+            }
+            let frames_to_decode = if entry_idx == last_entry && header.last_pat_frames > 0 {
+                header.last_pat_frames
+            } else {
+                header.pattern_size
+            };
+            frames.extend(Self::decode_ysg_pattern(
+                bytes,
+                start_ptr,
+                frames_to_decode,
+                header.features,
+            )?);
+        }
+
+        Ok(frames)
+    }
+
+    fn is_rle_token(mask: u16, rle_enabled: bool) -> bool {
+        rle_enabled && (mask & crate::delta::RLE_FLAG) != 0
+    }
+
+    /// Decodes one pattern's delta-encoded register stream into frames.
+    /// Handles RLE tokens (mask bit 15 set) when features bit 0 is set.
+    fn decode_ysg_pattern(
+        bytes: &[u8],
+        start_ptr: usize,
+        pattern_size: usize,
+        features: u8,
+    ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
+        let rle_enabled = (features & 0x01) != 0;
+        let mut frames = Vec::with_capacity(pattern_size);
+        let mut pp = start_ptr;
+        let mut registers = [0u8; 14];
+
+        while frames.len() < pattern_size {
+            if pp + 1 >= bytes.len() {
+                return Err("Unexpected EOF in YSG pattern data".into());
+            }
+            let mask = bytes[pp] as u16 | ((bytes[pp + 1] as u16) << 8);
+            pp += 2;
+
+            if Self::is_rle_token(mask, rle_enabled) {
+                if pp >= bytes.len() {
+                    return Err("Unexpected EOF in YSG RLE count byte".into());
+                }
+                let n = bytes[pp] as usize;
+                pp += 1;
+                let emit = (n + 1).min(pattern_size - frames.len());
+                let frame = {
+                    let mut f = Self::registers_to_frame(&registers);
+                    f.envelope_shape = None;
+                    f
+                };
+                for _ in 0..emit {
+                    frames.push(frame.clone());
+                }
+                continue;
+            }
+
+            let r13_written = (mask & (1 << 13)) != 0;
+
+            for (reg, slot) in registers.iter_mut().enumerate() {
+                if (mask & (1 << reg)) != 0 {
+                    if pp >= bytes.len() {
+                        return Err("Unexpected EOF in YSG pattern register payload".into());
+                    }
+                    *slot = bytes[pp];
+                    pp += 1;
+                }
+            }
+
+            let mut frame = Self::registers_to_frame(&registers);
+            if !r13_written {
+                frame.envelope_shape = None;
+            }
+            frames.push(frame);
+        }
+
+        Ok(frames)
+    }
+
+    /// Sanitizes a 16-byte raw YM frame into 14 hardware registers, stripping unused bits
+    /// and detecting YM6 digi-drum sample values. Returns the register array and whether
+    /// any digi-drum data was found and silenced.
+    fn sanitize_raw_frame(raw: &[u8; 16]) -> ([u8; 14], bool) {
+        let mut reg_14 = [0u8; 14];
+        reg_14.copy_from_slice(&raw[0..14]);
+        reg_14[1] &= 0x0F; // R1 bits 4-7 unused
+        reg_14[3] &= 0x0F; // R3 bits 4-7 unused
+        reg_14[5] &= 0x0F; // R5 bits 4-7 unused
+                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
+                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
+                           // chip — silence those channels to prevent false envelope-mode triggering.
+        let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
+        if reg_14[8] > 0x1F {
+            reg_14[8] = 0;
+        }
+        if reg_14[9] > 0x1F {
+            reg_14[9] = 0;
+        }
+        if reg_14[10] > 0x1F {
+            reg_14[10] = 0;
+        }
+        (reg_14, has_digidrum)
+    }
+
+    /// Converts 14 YM-2149 hardware registers to a YmFrame.
+    fn registers_to_frame(registers: &[u8; 14]) -> YmFrame {
+        let tone_a = registers[0] as u16 | ((registers[1] as u16) << 8);
+        let tone_b = registers[2] as u16 | ((registers[3] as u16) << 8);
+        let tone_c = registers[4] as u16 | ((registers[5] as u16) << 8);
+        let noise_period = registers[6];
+        let mixer = registers[7];
+        let volume_a = registers[8];
+        let volume_b = registers[9];
+        let volume_c = registers[10];
+        let env_period = registers[11] as u16 | ((registers[12] as u16) << 8);
+        let env_shape = registers[13];
+
+        YmFrame {
+            tone_a: Some(tone_a),
+            tone_b: Some(tone_b),
+            tone_c: Some(tone_c),
+            noise_period: Some(noise_period),
+            volume_a: Some(volume_a),
+            volume_b: Some(volume_b),
+            volume_c: Some(volume_c),
+            tone_enable_a: Some((mixer & 0x01) == 0),
+            tone_enable_b: Some((mixer & 0x02) == 0),
+            tone_enable_c: Some((mixer & 0x04) == 0),
+            noise_enable_a: Some((mixer & 0x08) == 0),
+            noise_enable_b: Some((mixer & 0x10) == 0),
+            noise_enable_c: Some((mixer & 0x20) == 0),
+            envelope_period: Some(env_period),
+            envelope_shape: Some(env_shape & 0x0F),
+            duration: Some(1),
+        }
+    }
+
+    /// Decodes raw .ym chiptune data into a YmSequence.
+    /// Returns the sequence and the number of frames where digi-drum sample values
+    /// were detected and silenced (YM6 only). Callers should warn the user when > 0.
+    pub fn from_ym_data(
+        name: &str,
+        ym_data: &[u8],
+        source_clock_override: Option<u32>,
+    ) -> Result<(Self, usize), Box<dyn std::error::Error>> {
         use ym2149_common::{ChiptunePlayer, MetadataFields};
         use ym2149_ym_replayer::decompress_if_needed;
         use ym2149_ym_replayer::load_song;
-        use ym2149_ym_replayer::player::PlaybackController;
 
         let decompressed = decompress_if_needed(ym_data)?;
-
-        let mut source_clock = 2_000_000u32;
-        if decompressed.len() >= 26
-            && (&decompressed[0..4] == b"YM5!" || &decompressed[0..4] == b"YM6!")
-        {
-            source_clock = u32::from_be_bytes([
-                decompressed[22],
-                decompressed[23],
-                decompressed[24],
-                decompressed[25],
-            ]);
-        }
+        let source_clock =
+            source_clock_override.unwrap_or_else(|| Self::detect_ym_source_clock(&decompressed));
 
         let target_clock = 1_789_773u32;
         let ratio = target_clock as f64 / source_clock as f64;
         let apply_scaling = (ratio - 1.0).abs() > 0.0001;
 
-        let (mut player, summary) = load_song(ym_data)?;
-        let total_frames = summary.frame_count;
-        let samples_per_frame = summary.samples_per_frame as usize;
+        // YM2 / YM3 format: interleaved register data (all R0 values, then all R1, ...) at 50 Hz.
+        // Same interleaved layout as YM5 but without metadata. Chip clock assumed 2 MHz (Atari ST).
+        if decompressed.len() >= 4 {
+            let magic = &decompressed[0..4];
+            if magic == b"YM2!" || magic == b"YM3!" {
+                let data = &decompressed[4..];
+                let frame_count = data.len() / 14;
+                let mut frames = Vec::with_capacity(frame_count);
+                for f in 0..frame_count {
+                    let mut raw16 = [0u8; 16];
+                    for r in 0..14 {
+                        raw16[r] = data[r * frame_count + f];
+                    }
+                    let (reg_14, _) = Self::sanitize_raw_frame(&raw16);
+                    let mut frame = Self::registers_to_frame(&reg_14);
+                    if apply_scaling {
+                        frame.scale_pitch(ratio);
+                    }
+                    frames.push(frame);
+                }
+                return Ok((
+                    Self {
+                        name: name.to_string(),
+                        timing: TimingConfig {
+                            master_clock_hz: target_clock,
+                            frame_rate: SystemHz::Hz50,
+                        },
+                        priority: 0,
+                        loop_start: None,
+                        frames,
+                    },
+                    0,
+                ));
+            }
+        }
 
-        // Loop point is static file metadata, safe to read before `play()` advances
-        // playback state.
+        let (player, summary) = load_song(&decompressed)?;
+        let total_frames = summary.frame_count;
+
         let loop_start = player
             .metadata()
             .loop_frame()
             .filter(|&frame| frame < total_frames);
-        PlaybackController::play(&mut player)?;
 
-        let mut frames = Vec::with_capacity(total_frames);
+        let raw_frames = Self::parse_raw_frames(&decompressed)
+            .ok_or("Unsupported YM format: only YM4/YM5/YM6 are supported")?;
 
-        for _ in 0..total_frames {
-            let regs = player.dump_registers();
+        let mut digidrum_frames = 0usize;
+        let frames = raw_frames
+            .into_iter()
+            .take(total_frames)
+            .map(|raw| {
+                let (reg_14, has_digidrum) = Self::sanitize_raw_frame(&raw);
+                if has_digidrum {
+                    digidrum_frames += 1;
+                }
+                let mut frame = Self::registers_to_frame(&reg_14);
+                frame.envelope_shape = if raw[13] == 0xFF {
+                    None
+                } else {
+                    Some(raw[13] & 0x0F)
+                };
+                if apply_scaling {
+                    frame.scale_pitch(ratio);
+                }
+                frame
+            })
+            .collect();
 
-            let tone_a = regs[0] as u16 | ((regs[1] as u16) << 8);
-            let tone_b = regs[2] as u16 | ((regs[3] as u16) << 8);
-            let tone_c = regs[4] as u16 | ((regs[5] as u16) << 8);
-            let noise_period = regs[6];
-            let mixer = regs[7];
-            let volume_a = regs[8];
-            let volume_b = regs[9];
-            let volume_c = regs[10];
-            let envelope_period = regs[11] as u16 | ((regs[12] as u16) << 8);
-            let envelope_shape = regs[13];
+        Ok((
+            Self {
+                name: name.to_string(),
+                timing: TimingConfig {
+                    master_clock_hz: target_clock,
+                    frame_rate: SystemHz::Hz50,
+                },
+                priority: 0,
+                loop_start,
+                frames,
+            },
+            digidrum_frames,
+        ))
+    }
 
-            let mut frame = YmFrame {
-                tone_a: Some(tone_a),
-                tone_b: Some(tone_b),
-                tone_c: Some(tone_c),
-                noise_period: Some(noise_period),
-                volume_a: Some(volume_a),
-                volume_b: Some(volume_b),
-                volume_c: Some(volume_c),
-                tone_enable_a: Some((mixer & 0x01) == 0),
-                tone_enable_b: Some((mixer & 0x02) == 0),
-                tone_enable_c: Some((mixer & 0x04) == 0),
-                noise_enable_a: Some((mixer & 0x08) == 0),
-                noise_enable_b: Some((mixer & 0x10) == 0),
-                noise_enable_c: Some((mixer & 0x20) == 0),
-                envelope_period: Some(envelope_period),
-                envelope_shape: Some(envelope_shape),
-                duration: Some(1),
-            };
-
-            if apply_scaling {
-                frame.scale_pitch(ratio);
+    /// Detects the target YM clock frequency from chiptune header.
+    fn detect_ym_source_clock(decompressed: &[u8]) -> u32 {
+        if decompressed.len() >= 26
+            && (&decompressed[0..4] == b"YM5!" || &decompressed[0..4] == b"YM6!")
+        {
+            let clock = u32::from_be_bytes([
+                decompressed[22],
+                decompressed[23],
+                decompressed[24],
+                decompressed[25],
+            ]);
+            if clock > 0 {
+                clock
+            } else {
+                ATARI_ST_CLOCK
             }
+        } else {
+            ATARI_ST_CLOCK
+        }
+    }
 
-            frames.push(frame);
+    fn parse_raw_frames(decompressed: &[u8]) -> Option<Vec<[u8; 16]>> {
+        use ym2149_ym_replayer::parser::{Ym6Parser, YmParser};
 
-            // Advance player by one frame
-            let mut dummy_buf = vec![0.0f32; samples_per_frame];
-            player.generate_samples_into(&mut dummy_buf);
+        if let Ok((frames, _)) = YmParser::new().parse_full(decompressed) {
+            return Some(frames);
         }
 
-        Ok(Self {
-            name: name.to_string(),
-            timing: TimingConfig {
-                master_clock_hz: target_clock,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
-            loop_start,
-            frames,
-        })
+        let ym6 = Ym6Parser {};
+        if let Ok((frames, _, _, _)) = ym6.parse_full(decompressed) {
+            return Some(frames);
+        }
+
+        None
     }
 
     /// Byte length of `ym_data` after decompression (e.g. from LHA-compressed
@@ -270,10 +454,50 @@ impl YmSequence {
         use ym2149_ym_replayer::decompress_if_needed;
         Ok(decompress_if_needed(ym_data)?.len())
     }
+
+    /// Loads a YmSequence from a file path (.ysg, .ym, or .json).
+    pub fn load_from_path(
+        input: &std::path::Path,
+        clock_override: Option<u32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+
+        match extension {
+            "ysg" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_ysg(name, &bytes)
+            }
+            "json" => {
+                let content = std::fs::read_to_string(input)?;
+                Ok(serde_json::from_str(&content)?)
+            }
+            "ym" => {
+                let bytes = std::fs::read(input)?;
+                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override)?;
+                Ok(seq)
+            }
+            _ => Err(format!(
+                "Unsupported song file extension '.{}'. Expected .ysg, .ym, or .json",
+                extension
+            )
+            .into()),
+        }
+    }
 }
 
 impl YmFrame {
-    pub fn apply_to_chip(&self, chip: &mut impl ym2149::Ym2149Backend, mixer: &mut u8) {
+    /// Writes frame register values directly to a YM-2149 chip backend.
+    ///
+    /// Envelope shape (R13) is written whenever `envelope_shape` is `Some` — including when the
+    /// value matches the previous frame, because any write to R13 resets the hardware envelope
+    /// phase. `None` means the original data used the 0xFF sentinel (no write this frame).
+    pub fn apply_to_chip(
+        &self,
+        chip: &mut impl ym2149::Ym2149Backend,
+        mixer: &mut u8,
+        last_env_shape: &mut Option<u8>,
+    ) {
         // Tone A (R0, R1)
         if let Some(tone) = self.tone_a {
             chip.write_register(0, (tone & 0xFF) as u8);
@@ -355,30 +579,39 @@ impl YmFrame {
             chip.write_register(12, ((period >> 8) & 0xFF) as u8);
         }
 
-        // Envelope Shape (R13)
+        // Envelope Shape (R13): only write when the value changes.
+        // Same-value writes retrigger the envelope phase, causing audible clicks when the
+        // composer repeats R13 to mark phrase boundaries rather than to intentionally reset.
         if let Some(shape) = self.envelope_shape {
-            let current_shape = chip.read_register(13);
-            if current_shape != (shape & 0x0F) {
-                chip.write_register(13, shape & 0x0F);
+            let shape_val = shape & 0x0F;
+            if *last_env_shape != Some(shape_val) {
+                chip.write_register(13, shape_val);
+                *last_env_shape = Some(shape_val);
             }
         }
     }
 
-    pub fn scale_pitch(&mut self, ratio: f64) {
+    /// Scales tone and noise pitch periods by clock ratio safely.
+    fn scale_pitch(&mut self, ratio: f64) {
+        let ratio = if ratio.is_finite() && ratio > 0.0 {
+            ratio
+        } else {
+            1.0
+        };
         if let Some(t) = self.tone_a {
-            self.tone_a = Some((t as f64 * ratio).round() as u16);
+            self.tone_a = Some((t as f64 * ratio).round().clamp(0.0, 4095.0) as u16);
         }
         if let Some(t) = self.tone_b {
-            self.tone_b = Some((t as f64 * ratio).round() as u16);
+            self.tone_b = Some((t as f64 * ratio).round().clamp(0.0, 4095.0) as u16);
         }
         if let Some(t) = self.tone_c {
-            self.tone_c = Some((t as f64 * ratio).round() as u16);
+            self.tone_c = Some((t as f64 * ratio).round().clamp(0.0, 4095.0) as u16);
         }
         if let Some(n) = self.noise_period {
-            self.noise_period = Some(((n & 0x1F) as f64 * ratio).round() as u8);
+            self.noise_period = Some(((n & 0x1F) as f64 * ratio).round().clamp(0.0, 31.0) as u8);
         }
         if let Some(e) = self.envelope_period {
-            self.envelope_period = Some((e as f64 * ratio).round() as u16);
+            self.envelope_period = Some((e as f64 * ratio).round().clamp(0.0, 65535.0) as u16);
         }
     }
 }
@@ -403,6 +636,26 @@ pub struct SfxFrame {
     pub duration: Option<u8>,
 }
 
+impl SfxFrame {
+    pub fn new(
+        tone_enable: bool,
+        noise_enable: bool,
+        tone: u16,
+        noise: u8,
+        volume: u8,
+        duration: u8,
+    ) -> Self {
+        Self {
+            tone_enable: Some(tone_enable),
+            noise_enable: Some(noise_enable),
+            tone: Some(tone),
+            noise: Some(noise),
+            volume: Some(volume),
+            duration: Some(duration),
+        }
+    }
+}
+
 /// Channel-agnostic Sound Effect manifest matching sfx-schema.json.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -417,6 +670,7 @@ pub struct SfxSequence {
 }
 
 impl SfxFrame {
+    /// Writes SFX frame values to a specific YM-2149 audio channel.
     pub fn apply_to_chip(
         &self,
         chip: &mut impl ym2149::Ym2149Backend,
@@ -479,6 +733,7 @@ impl SfxFrame {
 }
 
 impl SfxSequence {
+    /// Parses an AYFX CSV text export into an SfxSequence.
     pub fn from_ayfx_csv(name: &str, content: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut frames = Vec::new();
         for (line_num, line) in content.lines().enumerate() {
@@ -510,22 +765,15 @@ impl SfxSequence {
             };
 
             let tone = parse_val(parts[2])?;
-            let noise = parse_val(parts[3])? as u8;
-            let volume = parse_val(parts[4])? as u8;
+            let noise = (parse_val(parts[3])? & 0x1F) as u8;
+            let volume = (parse_val(parts[4])? & 0x1F) as u8;
 
-            frames.push(SfxFrame {
-                tone_enable: Some(t),
-                noise_enable: Some(n),
-                tone: Some(tone),
-                noise: Some(noise),
-                volume: Some(volume),
-                duration: Some(1),
-            });
+            frames.push(SfxFrame::new(t, n, tone, noise, volume, 1));
         }
 
         Ok(Self {
             name: name.to_string(),
-            source_clock: 2_000_000,
+            source_clock: ZX_SPECTRUM_CLOCK,
             source_hz: 50,
             priority: 1,
             preferred_channels: None,
@@ -534,6 +782,7 @@ impl SfxSequence {
         })
     }
 
+    /// Parses an AYFX bank binary into a list of SfxSequences.
     pub fn from_ayfx_bank(bank_data: &[u8]) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
         if bank_data.is_empty() {
             return Err("Empty bank data".into());
@@ -554,89 +803,18 @@ impl SfxSequence {
                 continue;
             }
 
-            // Determine max length for decode
-            let max_len = if i < num_effects - 1 {
-                let next_ptr = 3 + i * 2;
-                if next_ptr + 1 < bank_data.len() {
-                    let next_offset_val = (bank_data[next_ptr] as u16
-                        | ((bank_data[next_ptr + 1] as u16) << 8))
-                        as usize;
-                    let next_start_idx = 4 + i * 2 + next_offset_val;
-                    if next_start_idx > start_idx && next_start_idx <= bank_data.len() {
-                        next_start_idx - start_idx
-                    } else {
-                        bank_data.len() - start_idx
-                    }
-                } else {
-                    bank_data.len() - start_idx
-                }
-            } else {
-                bank_data.len() - start_idx
-            };
-
-            let mut frames = Vec::new();
-            let mut pp = start_idx;
-            let end_limit = start_idx + max_len;
-
-            let mut tone = 0u16;
-            let mut noise = 0u8;
-
-            while pp < end_limit {
-                let it = bank_data[pp];
-                pp += 1;
-
-                if (it & (1 << 5)) != 0 {
-                    if pp + 1 >= end_limit {
-                        break;
-                    }
-                    tone = (bank_data[pp] as u16 | ((bank_data[pp + 1] as u16) << 8)) & 0xFFF;
-                    pp += 2;
-                }
-                if (it & (1 << 6)) != 0 {
-                    if pp >= end_limit {
-                        break;
-                    }
-                    let n_val = bank_data[pp];
-                    pp += 1;
-
-                    if it == 0xD0 && n_val >= 0x20 {
-                        break;
-                    }
-                    noise = n_val & 0x1F;
-                }
-
-                let vol = it & 0x0F;
-                let t_enable = (it & (1 << 4)) == 0;
-                let n_enable = (it & (1 << 7)) == 0;
-
-                frames.push(SfxFrame {
-                    tone_enable: Some(t_enable),
-                    noise_enable: Some(n_enable),
-                    tone: Some(tone),
-                    noise: Some(noise),
-                    volume: Some(vol),
-                    duration: Some(1),
-                });
+            let max_len = Self::calculate_ayfx_effect_max_len(bank_data, i, num_effects, start_idx);
+            let end_limit = (start_idx + max_len).min(bank_data.len());
+            if start_idx >= end_limit {
+                continue;
             }
 
-            // Parse optional null-terminated name if present in remaining space of effect block
-            let mut name = format!("wizball_{}", i + 1);
-            if pp < end_limit {
-                let mut name_bytes = Vec::new();
-                while pp < end_limit && bank_data[pp] != 0 {
-                    name_bytes.push(bank_data[pp]);
-                    pp += 1;
-                }
-                if !name_bytes.is_empty() {
-                    if let Ok(decoded_name) = String::from_utf8(name_bytes) {
-                        name = decoded_name;
-                    }
-                }
-            }
+            let (frames, consumed) = Self::decode_ayfx_frames(&bank_data[start_idx..end_limit]);
+            let name = Self::parse_ayfx_effect_name(bank_data, start_idx + consumed, end_limit, i);
 
             sequences.push(SfxSequence {
                 name,
-                source_clock: 2_000_000,
+                source_clock: ZX_SPECTRUM_CLOCK,
                 source_hz: 50,
                 priority: 1,
                 preferred_channels: None,
@@ -648,7 +826,73 @@ impl SfxSequence {
         Ok(sequences)
     }
 
+    /// Computes maximum byte length of an AYFX effect in a bank.
+    fn calculate_ayfx_effect_max_len(
+        bank_data: &[u8],
+        i: usize,
+        num_effects: usize,
+        start_idx: usize,
+    ) -> usize {
+        if start_idx >= bank_data.len() {
+            return 0;
+        }
+        if i < num_effects - 1 {
+            let next_ptr = 3 + i * 2;
+            if next_ptr + 1 < bank_data.len() {
+                let next_offset_val =
+                    (bank_data[next_ptr] as u16 | ((bank_data[next_ptr + 1] as u16) << 8)) as usize;
+                let next_start_idx = 4 + i * 2 + next_offset_val;
+                if next_start_idx <= bank_data.len() {
+                    if let Some(diff) = next_start_idx.checked_sub(start_idx) {
+                        if diff > 0 {
+                            return diff;
+                        }
+                    }
+                }
+            }
+        }
+        bank_data.len().saturating_sub(start_idx)
+    }
+
+    /// Parses optional null-terminated effect name from AYFX block.
+    fn parse_ayfx_effect_name(
+        bank_data: &[u8],
+        mut pp: usize,
+        end_limit: usize,
+        fallback_idx: usize,
+    ) -> String {
+        if pp < end_limit {
+            let mut name_bytes = Vec::new();
+            while pp < end_limit && bank_data[pp] != 0 {
+                name_bytes.push(bank_data[pp]);
+                pp += 1;
+            }
+            if !name_bytes.is_empty() {
+                if let Ok(decoded_name) = String::from_utf8(name_bytes) {
+                    return decoded_name;
+                }
+            }
+        }
+        format!("sfx_{}", fallback_idx + 1)
+    }
+
+    /// Parses a single AYFX effect binary into an SfxSequence.
     pub fn from_ayfx_effect(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        let (frames, _) = Self::decode_ayfx_frames(bytes);
+
+        Ok(Self {
+            name: name.to_string(),
+            source_clock: ZX_SPECTRUM_CLOCK,
+            source_hz: 50,
+            priority: 1,
+            preferred_channels: None,
+            loop_start: None,
+            frames,
+        })
+    }
+
+    /// Decodes AYFX frame bitstream data.
+    fn decode_ayfx_frames(bytes: &[u8]) -> (Vec<SfxFrame>, usize) {
         let mut frames = Vec::new();
         let mut pp = 0;
         let mut tone = 0u16;
@@ -683,19 +927,23 @@ impl SfxSequence {
             let t_enable = (it & (1 << 4)) == 0;
             let n_enable = (it & (1 << 7)) == 0;
 
-            frames.push(SfxFrame {
-                tone_enable: Some(t_enable),
-                noise_enable: Some(n_enable),
-                tone: Some(tone),
-                noise: Some(noise),
-                volume: Some(vol),
-                duration: Some(1),
-            });
+            frames.push(SfxFrame::new(t_enable, n_enable, tone, noise, vol, 1));
         }
+
+        (frames, pp)
+    }
+
+    /// Parses compiled .yfx binary data into an SfxSequence.
+    pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        if !bytes.len().is_multiple_of(5) {
+            return Err("YFX file size must be a multiple of 5".into());
+        }
+
+        let frames = Self::decode_yfx_frames(bytes);
 
         Ok(Self {
             name: name.to_string(),
-            source_clock: 2_000_000,
+            source_clock: ZX_SPECTRUM_CLOCK,
             source_hz: 50,
             priority: 1,
             preferred_channels: None,
@@ -704,11 +952,8 @@ impl SfxSequence {
         })
     }
 
-    pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if !bytes.len().is_multiple_of(5) {
-            return Err("YFX file size must be a multiple of 5".into());
-        }
-
+    /// Decodes 5-byte fixed-length YFX frame chunks.
+    fn decode_yfx_frames(bytes: &[u8]) -> Vec<SfxFrame> {
         let mut frames = Vec::new();
         let mut pp = 0;
 
@@ -725,24 +970,104 @@ impl SfxSequence {
             let noise_enable = (control & 0x02) != 0;
             let noise = (control >> 3) & 0x1F;
 
-            frames.push(SfxFrame {
-                tone_enable: Some(tone_enable),
-                noise_enable: Some(noise_enable),
-                tone: Some(tone),
-                noise: Some(noise),
-                volume: Some(volume),
-                duration: Some(duration),
-            });
+            frames.push(SfxFrame::new(
+                tone_enable,
+                noise_enable,
+                tone,
+                noise,
+                volume,
+                duration,
+            ));
         }
 
-        Ok(Self {
-            name: name.to_string(),
-            source_clock: 2_000_000,
-            source_hz: 50,
-            priority: 1,
-            preferred_channels: None,
-            loop_start: None,
-            frames,
-        })
+        frames
+    }
+
+    /// Loads a single SfxSequence from a file path (.yfx, .json, .csv, .afx, or .afb).
+    pub fn load_from_path(
+        input: &std::path::Path,
+        bank_index: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("sfx");
+
+        match extension {
+            "csv" => {
+                let content = std::fs::read_to_string(input)?;
+                Self::from_ayfx_csv(name, &content)
+            }
+            "afb" => {
+                let bytes = std::fs::read(input)?;
+                let bank = Self::from_ayfx_bank(&bytes)?;
+                if bank.is_empty() {
+                    return Err("AYFX bank contains no sound effects".into());
+                }
+                let idx = bank_index.min(bank.len() - 1);
+                Ok(bank[idx].clone())
+            }
+            "afx" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_ayfx_effect(name, &bytes)
+            }
+            "yfx" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_yfx(name, &bytes)
+            }
+            "json" => {
+                let content = std::fs::read_to_string(input)?;
+                Ok(serde_json::from_str(&content)?)
+            }
+            _ => Err(format!(
+                "Unsupported SFX file extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
+                extension
+            )
+            .into()),
+        }
+    }
+
+    /// Loads all SfxSequences from a list of file paths.
+    pub fn load_all_from_paths(
+        inputs: &[std::path::PathBuf],
+    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+        let mut sequences = Vec::new();
+        for input in inputs {
+            let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("sfx");
+
+            match extension {
+                "csv" => {
+                    let content = std::fs::read_to_string(input)?;
+                    sequences.push(Self::from_ayfx_csv(name, &content)?);
+                }
+                "afb" => {
+                    let bytes = std::fs::read(input)?;
+                    let bank = Self::from_ayfx_bank(&bytes)?;
+                    sequences.extend(bank);
+                }
+                "afx" => {
+                    let bytes = std::fs::read(input)?;
+                    sequences.push(Self::from_ayfx_effect(name, &bytes)?);
+                }
+                "yfx" => {
+                    let bytes = std::fs::read(input)?;
+                    sequences.push(Self::from_yfx(name, &bytes)?);
+                }
+                "json" => {
+                    let content = std::fs::read_to_string(input)?;
+                    sequences.push(serde_json::from_str(&content)?);
+                }
+                _ => {
+                    return Err(format!(
+                    "Unsupported SFX extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
+                    extension
+                )
+                    .into())
+                }
+            }
+        }
+        if sequences.is_empty() {
+            return Err("No sound effects were loaded.".into());
+        }
+        Ok(sequences)
     }
 }

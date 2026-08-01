@@ -1,16 +1,15 @@
 pub mod delta;
 pub mod player;
-pub mod progress;
-pub mod registers;
 pub mod sequence;
 pub mod timing;
 
-pub use delta::{DeltaCompiler, SongCompilation};
-pub use player::AudioPlayer;
-pub use progress::with_spinner;
-pub use registers::YmRegisters;
+pub use delta::{CompilerOptions, CompressionLevel, DeltaCompiler, YmSongDetails, RLE_FLAG};
+pub use player::{spawn_key_listener, AudioPlayer};
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
-pub use timing::{SystemHz, TimingConfig, calculate_delay};
+pub use timing::{
+    calculate_delay, HzOption, SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK,
+    ZX_SPECTRUM_CLOCK,
+};
 
 #[cfg(test)]
 mod tests {
@@ -34,12 +33,11 @@ mod tests {
         assert_eq!(calculate_delay(60), (21, 209));
     }
 
-
     #[test]
     fn test_delta_compiler_basic() {
         let mut seq = SfxSequence {
             name: "test_sfx".to_string(),
-            source_clock: 2_000_000,
+            source_clock: ATARI_ST_CLOCK,
             source_hz: 50,
             priority: 0,
             preferred_channels: None,
@@ -64,7 +62,7 @@ mod tests {
         let seq = SfxSequence::from_ayfx_csv("laser", csv_data).unwrap();
 
         assert_eq!(seq.name, "laser");
-        assert_eq!(seq.source_clock, 2_000_000);
+        assert_eq!(seq.source_clock, ZX_SPECTRUM_CLOCK);
         assert_eq!(seq.source_hz, 50);
         assert_eq!(seq.frames.len(), 2);
 
@@ -102,7 +100,7 @@ mod tests {
     fn test_from_yfx() {
         let source_seq = SfxSequence {
             name: "test_sfx".to_string(),
-            source_clock: 2_000_000,
+            source_clock: ATARI_ST_CLOCK,
             source_hz: 50,
             priority: 1,
             preferred_channels: None,
@@ -184,7 +182,9 @@ mod tests {
         };
 
         let compiler = DeltaCompiler::new();
-        let compiled = compiler.compile_song(&song);
+        let compiled = compiler
+            .compile_song(&song, CompressionLevel::Full, &CompilerOptions::default())
+            .unwrap();
         let ysg_bytes = compiled.bytes;
 
         let chosen_size = compiled.pattern_size;
@@ -199,5 +199,77 @@ mod tests {
         assert_eq!(decoded.frames[69].tone_a, Some(269));
         assert_eq!(decoded.timing.master_clock_hz, 1_789_773);
         assert_eq!(decoded.timing.frame_rate.hz_value(), 17);
+    }
+
+    #[test]
+    fn test_zero_hz_safety() {
+        let (y, _x) = calculate_delay(0);
+        assert!(y > 0);
+
+        let hz_custom = SystemHz::Custom(0);
+        assert!(hz_custom.frame_duration_ms().is_finite());
+    }
+
+    #[test]
+    fn test_rle_reduces_idle_frames() {
+        // Build a song with a long silent section — should shrink with RLE enabled.
+        let mut frames = Vec::new();
+        frames.push(YmFrame {
+            tone_a: Some(440),
+            volume_a: Some(15),
+            tone_enable_a: Some(true),
+            ..Default::default()
+        });
+        for _ in 0..50 {
+            frames.push(YmFrame::default()); // 50 idle frames
+        }
+        let song = YmSequence {
+            name: "rle_test".to_string(),
+            timing: TimingConfig {
+                master_clock_hz: ATARI_7800_CLOCK,
+                frame_rate: SystemHz::Hz50,
+            },
+            priority: 0,
+            loop_start: None,
+            frames,
+        };
+        let compiler = DeltaCompiler::new();
+        let with_rle = compiler
+            .compile_song(
+                &song,
+                CompressionLevel::Full,
+                &CompilerOptions {
+                    rle: true,
+                    ..CompilerOptions::default()
+                },
+            )
+            .unwrap();
+        let without_rle = compiler
+            .compile_song(
+                &song,
+                CompressionLevel::Full,
+                &CompilerOptions {
+                    rle: false,
+                    ..CompilerOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            with_rle.bytes.len() < without_rle.bytes.len(),
+            "RLE should reduce size for idle-heavy songs"
+        );
+
+        // Round-trip: decoded frame count must match
+        let decoded = YmSequence::from_ysg("rle_test", &with_rle.bytes).unwrap();
+        assert_eq!(
+            decoded.frames.len(),
+            song.frames.len().next_multiple_of(with_rle.pattern_size)
+        );
+    }
+
+    #[test]
+    fn test_truncated_ysg_returns_err() {
+        let truncated_bytes = vec![64, 2, 5, 0]; // 4 bytes instead of >=12
+        assert!(YmSequence::from_ysg("bad", &truncated_bytes).is_err());
     }
 }

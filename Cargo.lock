@@ -525,6 +525,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "lym"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "console",
+ "cpal",
+ "indicatif",
+ "serde_json",
+ "ym-core",
+ "ym2149",
+]
+
+[[package]]
 name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1269,33 +1282,15 @@ dependencies = [
 name = "ym-core"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "console",
  "cpal",
  "indicatif",
  "serde",
+ "serde_json",
  "ym2149",
  "ym2149-common",
  "ym2149-ym-replayer",
-]
-
-[[package]]
-name = "ym-sfx"
-version = "0.1.0"
-dependencies = [
- "clap",
- "console",
- "serde_json",
- "ym-core",
-]
-
-[[package]]
-name = "ym-song"
-version = "0.1.0"
-dependencies = [
- "clap",
- "console",
- "serde_json",
- "ym-core",
 ]
 
 [[package]]

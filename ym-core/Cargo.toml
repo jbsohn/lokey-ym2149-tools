@@ -2,9 +2,12 @@
 name = "ym-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
 ym2149.workspace = true
 cpal.workspace = true
 ym2149-ym-replayer.workspace = true
