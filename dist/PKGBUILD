@@ -1,0 +1,20 @@
+# Maintainer: John Sohn <john.sohn@gmail.com>
+pkgname=lym
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs and sound effects"
+arch=('x86_64' 'aarch64')
+url="https://github.com/username/lokey-ym2149-tools"
+license=('MIT')
+depends=('gcc-libs' 'alsa-lib')
+makedepends=('cargo' 'pkgconf' 'alsa-lib')
+
+build() {
+  cargo build --release --locked --workspace
+}
+
+package() {
+  install -Dm755 "$srcdir/../target/release/lym" "$pkgdir/usr/bin/lym"
+  install -Dm644 "$srcdir/../README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$srcdir/../LICENSE" "$pkgdir/usr/share/doc/$pkgname/LICENSE"
+}

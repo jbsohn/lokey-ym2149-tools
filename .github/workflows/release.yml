@@ -1,0 +1,117 @@
+name: Release Cross-Platform Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+  release:
+    types: [published, created]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: lym-linux-amd64
+            archive_ext: tar.gz
+            build_packages: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: lym-macos-arm64
+            archive_ext: tar.gz
+            build_packages: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: lym-macos-amd64
+            archive_ext: tar.gz
+            build_packages: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: lym-windows-amd64
+            archive_ext: zip
+            build_packages: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ALSA dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Run Tests
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+      - name: Build Release Binary
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+
+      - name: Package Binary Artifact (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/lym staging/
+          cp README.md staging/
+          cp LICENSE staging/
+          cd staging
+          tar -czvf ../${{ matrix.artifact_name }}.tar.gz *
+
+      - name: Package Binary Artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path staging
+          Copy-Item target\${{ matrix.target }}\release\lym.exe staging\
+          Copy-Item README.md staging\
+          Copy-Item LICENSE staging\
+          Compress-Archive -Path staging\* -DestinationPath ${{ matrix.artifact_name }}.zip
+
+      - name: Build Linux .deb and .rpm Packages
+        if: matrix.build_packages
+        run: |
+          cargo install cargo-deb cargo-generate-rpm
+          cargo deb --target ${{ matrix.target }} -p lym
+          cargo generate-rpm --target ${{ matrix.target }} -p lym
+          cp target/${{ matrix.target }}/debian/*.deb ./lym_amd64.deb
+          cp target/${{ matrix.target }}/generate-rpm/*.rpm ./lym-amd64.rpm
+          cp dist/PKGBUILD ./PKGBUILD
+
+      - name: Build Arch Linux Package
+        if: matrix.build_packages
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:latest bash -c "
+            pacman-key --init && pacman-key --populate archlinux &&
+            pacman -Syu --noconfirm base-devel cargo alsa-lib pkgconf &&
+            useradd -m builduser &&
+            chown -R builduser:builduser /workspace &&
+            sudo -u builduser makepkg -s --noconfirm
+          "
+
+      - name: Publish GitHub Release Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
+            *.deb
+            *.rpm
+            *.pkg.tar.zst
+            PKGBUILD
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

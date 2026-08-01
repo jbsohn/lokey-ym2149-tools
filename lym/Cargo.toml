@@ -3,6 +3,7 @@ name = "lym"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs and sound effects"
 
 [dependencies]
 ym-core = { path = "../ym-core" }
@@ -12,3 +13,22 @@ console.workspace = true
 indicatif.workspace = true
 cpal.workspace = true
 ym2149.workspace = true
+
+[package.metadata.deb]
+maintainer = "John Sohn <john.sohn@gmail.com>"
+copyright = "2026 John Sohn"
+extended-description = "Unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs and sound effects."
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/lym", "usr/bin/lym", "755"],
+    ["../README.md", "usr/share/doc/lym/README.md", "644"],
+    ["../LICENSE", "usr/share/doc/lym/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/lym", dest = "/usr/bin/lym", mode = "0755" },
+    { source = "../README.md", dest = "/usr/share/doc/lym/README.md", mode = "0644" },
+    { source = "../LICENSE", dest = "/usr/share/doc/lym/LICENSE", mode = "0644" }
+]
