@@ -1,7 +1,9 @@
 # lokey-ym-tools
 
-A comprehensive developer toolchain for compiling, auditing, and auditioning sound sequences and music streams
-targetting the Yamaha YM-2149 Programmable Sound Generator (PSG).
+A comprehensive developer toolchain for compiling, auditing, and auditioning sound sequences and music streams targeting the Yamaha YM-2149 Programmable Sound Generator (PSG).
+
+> [!IMPORTANT]
+> **Workstation-First Pre-Production & Auditioning Pipeline**: Perfect 99% of your game's soundtrack on your PC workstation before flashing a single byte to retro console hardware! Ingest multi-format sound effect assets (`.json`, `.csv`, `.afx`, `.afb`), compress 16-bit Atari ST `.ym` tracks into zero-CPU-overhead `.ysg` streams, and interactively mix music and SFX with real-time keyboard controls—all before touching target 6502 assembly code.
 
 ## Crates in the Workspace
 
@@ -33,41 +35,62 @@ This toolchain adopts a **host-precomputed streaming architecture**:
 - **The Trade-Off**: Pre-compiled `.ysg` streams require larger ROM storage (~15 KB – 28 KB vs 2 KB – 5 KB for native trackers). However, in exchange for ROM space, **6502 CPU overhead is reduced to near zero** during gameplay — the 6502 simply reads pre-diffed bytes during VBLANK interrupts and writes directly to PSG register ports.
 - **Full Hardware Audio Parity**: 8-bit retro systems (like the Atari 7800 with YM2149 expansion hardware) can stream rich 16-bit Atari ST chiptunes with 100% audio fidelity while preserving virtually all CPU cycles for game graphics, collision detection, and logic.
 
+> [!TIP]
+> **Why precompute on your PC?** By baking pitch-scaling, delta bitmasks, and pattern deduplication into the `.ysg` binary at build time, your retro game loop only pays a tiny VBLANK register write budget—giving your 8-bit game the voice of a 16-bit Atari ST.
+
 ---
 
-## Getting Started
+## Quick Start & Auditioning Workflow
 
 ### Prerequisites
 
-Ensure you have the Rust toolchain installed. Since auditioning plays audio directly through your speakers, `cpal` will
-bind to your system's default audio host (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows).
+Ensure you have the Rust toolchain installed. Since auditioning plays audio directly through your speakers, `cpal` will bind to your system's default audio host (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows).
 
 ### Usage
 
-#### 1. Play standard YM Chiptune or compiled .ysg files:
+#### 1. Song Workflow: Audition Source, Render, and Audition Target
+Audition the uncompressed 16-bit Atari ST source track, compile it into an optimized `.ysg` cartridge binary payload, and audition the compiled stream to verify audio parity:
 
 ```bash
+# Step 1: Audition original uncompressed Atari ST .ym source track:
+cargo run --bin lym -- song play --input tests/fixtures/song/ND-Loader.ym
+
+# Step 2: Render & compress into .ysg binary (also auto-generates .ysi ca65 include):
+cargo run --bin lym -- song render --input tests/fixtures/song/ND-Loader.ym --output tests/fixtures/song/ND-Loader.ysg
+
+# Step 3: Audition compiled target .ysg cartridge binary stream:
 cargo run --bin lym -- song play --input tests/fixtures/song/ND-Loader.ysg
 ```
 
-#### 2. Play custom JSON or compiled .yfx sound effects:
+#### 2. Sound Effects Workflow: Audition Source, Render, and Audition Target
+Audition raw sound effect sources (`.json`, `.csv`, `.afx`, `.afb`), compile them into 5-byte fixed-width `.yfx` binaries, and audition the target payload:
 
 ```bash
-cargo run --bin lym -- sfx play --input tests/fixtures/sfx/pew-x.yfx
+# Step 1: Audition raw JSON sound effect source:
+cargo run --bin lym -- sfx play --input tests/fixtures/sfx/blip.json
+
+# Step 2: Render into 5-byte fixed-width .yfx payload (also auto-generates .yfi ca65 include):
+cargo run --bin lym -- sfx render --input tests/fixtures/sfx/blip.json --output tests/fixtures/sfx/blip.yfx
+
+# Step 3: Audition compiled 5-byte fixed-width target payload:
+cargo run --bin lym -- sfx play --input tests/fixtures/sfx/blip.yfx
 ```
 
-#### 3. Render sound effects or songs into compiled YM-2149 binary payloads:
-
-```bash
-cargo run --bin lym -- sfx render --input tests/fixtures/test_sfx.json --output tests/fixtures/laser.yfx
-cargo run --bin lym -- song render --input tests/fixtures/song/ND-Loader.ym --output tests/fixtures/song/ND-Loader.ysg
-```
-
-#### 4. Interactively mix song playback with keyboard-triggered sound effects:
+#### 3. Live Interactive Keyboard Mixer
+Jam out with song playback while firing sound effects in real time using your keyboard (`1`–`9`, `0`, `SPACE`) to test channel takeover and conflict arbitration:
 
 ```bash
 cargo run --bin lym -- mix --song tests/fixtures/song/ND-Loader.ysg --sfx tests/fixtures/sfx/pew-x.yfx tests/fixtures/sfx/phew.csv --channel c
 ```
+
+---
+
+## Documentation
+
+- **[LYM CLI Reference Guide](docs/LymReference.md)** — Complete command-line manual for `lym song`, `lym sfx`, and `lym mix` subcommands and options.
+- **[File Formats Specification](docs/FileFormats.md)** — Specifications for `.ysg`, `.yfx`, `.ysi`, `.yfi`, `.afx`, `.afb`, `.json`, `.csv`, `.ym`.
+- **[YM Sound & Replayer Specification](docs/YmSoundDesign.md)** — Internal design, compiler architecture, channel takeover arbitration, and hardware specs.
+- **[Musical Credits & Test Assets](docs/Musicians.md)** — Composers and attributions for test song fixtures.
 
 ---
 

@@ -1,50 +1,34 @@
 # YM Sound & Replayer Specification
 
-## Scope & Ingestion
+## Scope & Philosophy: Workstation-First Pre-Production
 
-The SDK compiles chiptune formats into custom, highly-compressed cartridge binary formats. While the primary target is
-currently the Atari 7800 (running at 1.789773 MHz), the architecture and compilation tools are designed to remain
-platform-agnostic, keeping the door open to easily target other retro platforms using the YM2149 or AY-3-8910 (e.g.
-Atari ST, ZX Spectrum, MSX, Amstrad CPC) by simply adjusting clock-scaling and timing configurations. We leverage the **
-`ym2149-rs`** workspace to parse, resample, and compile these assets.
+The `lokey-ym-tools` SDK is built around a **workstation-first audio pre-production workflow**. Instead of debugging audio routines on physical target hardware or hardware emulators, developers can author, ingest, compress, audition, and interactively mix their entire soundtrack directly on their PC workstation:
+
+1. **Multi-Format Ingestion**: Convert hand-authored `.json`, visual AYFX `.csv` exports, binary `.afx` effects, or multi-effect `.afb` banks into optimized 5-byte fixed-width `.yfx` VBI overrides.
+2. **16-Bit $\rightarrow$ 8-Bit Chiptune Conversion**: Pre-compile complex Atari ST `.ym` tracks into zero-CPU-overhead `.ysg` streams, offloading all pitch scaling, envelope calculations, and 16-bit delta bitmasking at build time.
+3. **Desktop Audition & Live Keyboard Mixing**: Preview songs and sound effects through cycle-accurate YM2149 emulation and `cpal` speakers, interactive key-triggering (`1`–`9`, `0`, `SPACE`) to test channel takeover and priority arbitration live before writing a single line of target assembly.
 
 ### Supported Input Formats
 
 * **Music**:
     * `.ym` (Atari ST YM5/YM6 register dumps) via `ym2149-ym-replayer`.
+    * `.json` (Hand-authored music sequence source files).
 * **Sound Effects (SFX)**:
     * `.json` (Hand-authored sequence source files).
     * `.csv` (AYFXedit active-high columns visual export).
     * `.afx` (Single AYFX binary effect file).
+    * `.afb` (Multi-effect binary sound bank).
 
 ---
 
 ## Cartridge Binary Formats
 
-Audio assets are compiled into optimized formats to fit within cartridge ROM space constraints and run under a tiny 6502
-CPU cycle budget on the Atari 7800.
+Audio assets are compiled into custom target formats (`.ysg` for songs, `.yfx` for sound effects) to fit within cartridge ROM space constraints and execute within a minimal 6502 CPU cycle budget.
 
-### A. Music Format (`.ysg`)
+* **Music Format (`.ysg`)**: Uses a 14-byte fixed header, sequence index table, pattern offset pointers, and pattern-deduplicated delta-mask frame streams. The first frame of every pattern block is fully loaded (`0x3FFF` mask), guaranteeing $O(1)$ pattern seeking, looping, and clean SFX recovery.
+* **Sound Effects Format (`.yfx`)**: Uses a 5-byte fixed-width frame representation (`PitchLow`, `PitchHigh`, `Volume`, `Control`, `Duration`), allowing rapid VBI channel overrides without variable-length parsing overhead.
 
-* **4-Byte Header**: `[PatternSize, NumUnique, SeqLen, LoopPattern]`.
-* **Sequence Table**: Array of `SeqLen` bytes defining the order of patterns.
-* **Pattern Offset Table**: Array of `NumUnique` 32-bit little-endian pointers (`NumUnique * 4` bytes) relative to the
-  pattern data start, preventing 64KB ROM offset wraps.
-* **Pattern-based Delta Masking**: The song is divided into fixed-size pattern blocks of `PatternSize` frames.
-* **Pattern Independence**: The first frame of every pattern block is fully-loaded using a full `0x3FFF` register mask
-  (R0-R13), eliminating inter-pattern dependencies and allowing $O (1)$ seeking, looping, and phase-independent sound
-  effects takeover.
-* **Looping**: Seamless loop-back to the `LoopPattern` sequence index is natively encoded in the file header.
-
-### B. Sound Effects Format (`.yfx`)
-
-* **5-Byte Fixed-Width Frames**: Each sound effect frame is encoded as exactly 5 bytes:
-    1. **Byte 0 (Control Mask)**: Channel enable flags (Tone Enable, Noise Enable).
-    2. **Byte 1 (Pitch Low)**: Fine tone divider.
-    3. **Byte 2 (Pitch High)**: Coarse tone divider (bits 0-3) and Noise Period (bits 4-8).
-    4. **Byte 3 (Volume)**: Channel volume (0-15).
-    5. **Byte 4 (Duration)**: Tick count multiplier specifying how long the frame is held.
-* This fixed-width format allows extremely rapid 6502 register overrides without parsing variable-length payloads.
+*(For exact byte layout, field offsets, and bit allocation tables, see the [File Formats Specification](FileFormats.md)).*
 
 ---
 
@@ -113,18 +97,18 @@ We have selected the following crates to form the core of our workspace:
 
 ---
 
-## Rust Refactor Roadmap & Core Milestones
+## Rust Workspace Architecture & Implemented Milestones
 
-The primary development roadmap for the new Rust-based SDK workspace consists of two core milestones:
+The core SDK workspace provides full implementation of sound effect and music toolchains across two primary feature suites:
 
-* **Milestone 1: `lym sfx` (Sound Effects Compiler & Player)**
+* **Milestone 1: `lym sfx` (Sound Effects Compiler & Player)** `[COMPLETED]`
     * Parse JSON, AYFX `.csv`, binary `.afx`, and multi-effect bank `.afb` files.
-    * Implement real-time workstation audio playback previewer using the `ym2149` chip emulator core and `cpal` output streaming.
-    * Compile sound effects into optimized `.yfx` target binaries using the 5-byte fixed-width format.
-* **Milestone 2: `lym song` & `lym mix` (Music Compiler, Auditioning & Interactive Mixer)**
+    * Real-time workstation audio playback previewer using the `ym2149` chip emulator core and `cpal` output streaming.
+    * Compile sound effects into optimized `.yfx` target binaries using the 5-byte fixed-width format and auto-generate `.yfi` ca65 include headers.
+* **Milestone 2: `lym song` & `lym mix` (Music Compiler, Auditioning & Interactive Mixer)** `[COMPLETED]`
     * Directly parse legacy `.ym` files (including LHA compressed sources) and `.ysg` streams.
-    * Apply compile-time pitch-scaling (Atari ST 2.0MHz $\rightarrow$ 7800 1.789773MHz) and temporal resampling/decimation.
-    * Implement **Pattern-based Delta Masking** and sequence packing.
+    * Apply compile-time pitch-scaling (Atari ST 2.0MHz $\rightarrow$ 7800 1.789773MHz) and temporal resampling/decimation (`--step`).
+    * Implement **Pattern-based Delta Masking**, RLE idle-run tokens, and sequence packing (`.ysg` and `.ysi` ca65 include headers).
     * Real-time interactive multi-channel song & SFX keyboard mixer with 10 key slots (`1`–`9`, `0`, `SPACE`), polyphonic channel fallback, and arrow-key seeking (`←`/`→`).
 
 ---

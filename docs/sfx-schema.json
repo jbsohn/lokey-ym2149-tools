@@ -1,11 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "YmSound YAML Specification",
+  "title": "YmSound JSON Specification",
   "type": "object",
   "required": [
     "name",
-    "sourceClock",
-    "sourceHz",
     "priority",
     "frames"
   ],
@@ -17,15 +15,12 @@
     "sourceClock": {
       "type": "integer",
       "minimum": 1,
-      "description": "Original sound chip clock frequency in Hz (e.g. 2000000 for Atari ST)."
+      "description": "Original sound chip clock frequency in Hz (e.g. 2000000 for Atari ST, optional)."
     },
     "sourceHz": {
       "type": "integer",
-      "enum": [
-        50,
-        60
-      ],
-      "description": "Original playback tick rate in Hz."
+      "minimum": 1,
+      "description": "Original playback tick rate in Hz (e.g. 50 or 60, optional)."
     },
     "priority": {
       "type": "integer",
@@ -40,7 +35,10 @@
         "enum": [
           "A",
           "B",
-          "C"
+          "C",
+          "a",
+          "b",
+          "c"
         ]
       },
       "description": "Preferred YM2149 channels to play this sound effect on."

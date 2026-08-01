@@ -31,5 +31,4 @@ bridge" can deliver a truly premium audio experience on 8-bit hardware.
 
 ## Disclaimer
 
-These files are included for educational and demonstration purposes only. All copyrights remain with their respective
-authors.
+These files are included for educational and demonstration purposes only. All copyrights remain with their respective authors.
