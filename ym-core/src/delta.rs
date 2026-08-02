@@ -1,3 +1,4 @@
+use crate::sequence;
 use crate::sequence::{SfxSequence, YmSequence};
 
 /// Bit 15 of the 16-bit frame mask — signals an RLE idle-run token.
@@ -26,6 +27,18 @@ pub struct CompilerOptions {
     pub rle: bool,
     /// Enable variable-length mask (default: false until implemented).
     pub varlength_mask: bool,
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn usize_to_u8(val: usize) -> u8 {
+    val as u8
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn usize_to_u32(val: usize) -> u32 {
+    val as u32
 }
 
 impl Default for CompilerOptions {
@@ -64,11 +77,13 @@ pub struct YmSongDetails {
 }
 
 impl DeltaCompiler {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
 
     /// Compiles a sound effect sequence into a 5-byte fixed-width frame representation.
+    #[must_use]
     pub fn compile_sfx(&self, sequence: &SfxSequence) -> Vec<u8> {
         let mut compiled_bytes = Vec::new();
 
@@ -123,6 +138,11 @@ impl DeltaCompiler {
     ///
     /// `level` controls how much compression is applied — use [`CompressionLevel::Full`]
     /// for production, or a reduced level to isolate audio issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the song length exceeds the 255-entry sequence table
+    /// limit across all candidate pattern sizes.
     pub fn compile_song(
         &self,
         sequence: &YmSequence,
@@ -134,15 +154,14 @@ impl DeltaCompiler {
             && level != CompressionLevel::None;
 
         if !use_dedup {
-            return self.compile_song_no_dedup(sequence, level, options);
+            return Self::compile_song_no_dedup(sequence, level, options);
         }
 
-        self.compile_song_full(sequence, options)
+        Self::compile_song_full(sequence, options)
     }
 
     /// Full delta + dedup compression, searching for the best pattern size.
     fn compile_song_full(
-        &self,
         sequence: &YmSequence,
         options: &CompilerOptions,
     ) -> Result<YmSongDetails, Box<dyn std::error::Error>> {
@@ -152,7 +171,7 @@ impl DeltaCompiler {
         let candidate_sizes = Self::candidate_pattern_sizes(sequence.frames.len());
 
         for size in candidate_sizes {
-            if let Some(data) = self.compile_song_with_size(sequence, size, options) {
+            if let Some(data) = Self::compile_song_with_size(sequence, size, options) {
                 if best_data.as_ref().is_none_or(|b| data.len() < b.len()) {
                     best_data = Some(data);
                     best_size = size;
@@ -177,7 +196,6 @@ impl DeltaCompiler {
     /// Used for `DeltaOnly` and `None` compression levels so we can isolate which
     /// stage causes audio problems.
     fn compile_song_no_dedup(
-        &self,
         sequence: &YmSequence,
         level: CompressionLevel,
         options: &CompilerOptions,
@@ -192,7 +210,7 @@ impl DeltaCompiler {
                 continue;
             }
 
-            let last_pat_frames = (total_frames % size) as u8;
+            let last_pat_frames = usize_to_u8(total_frames % size);
             let raw_blocks = Self::chunk_frames_into_patterns(&sequence.frames, size);
             let unique_patterns: Vec<Vec<u8>> = raw_blocks
                 .iter()
@@ -200,7 +218,7 @@ impl DeltaCompiler {
                 .collect();
 
             // Sequence table = 0, 1, 2, … (no dedup — every block is unique)
-            let sequence_table: Vec<u8> = (0..unique_patterns.len() as u8).collect();
+            let sequence_table: Vec<u8> = (0..usize_to_u8(unique_patterns.len())).collect();
             let loop_pattern =
                 Self::calculate_loop_pattern(sequence.loop_start, size, sequence_table.len());
             let header = Self::build_ysg_header(
@@ -232,7 +250,6 @@ impl DeltaCompiler {
     /// Attempts to compile `sequence` using a fixed `pattern_size`; returns `None` if the
     /// resulting sequence table exceeds 255 entries.
     fn compile_song_with_size(
-        &self,
         sequence: &YmSequence,
         pattern_size: usize,
         options: &CompilerOptions,
@@ -242,7 +259,7 @@ impl DeltaCompiler {
         }
 
         let total_frames = sequence.frames.len();
-        let last_pat_frames = (total_frames % pattern_size) as u8;
+        let last_pat_frames = usize_to_u8(total_frames % pattern_size);
 
         // Chunk & serialize frames into pattern bytes
         let serialized_blocks =
@@ -304,7 +321,7 @@ impl DeltaCompiler {
             Some(frame) => {
                 let pat_idx = frame / pattern_size;
                 if pat_idx < seq_len {
-                    pat_idx as u8
+                    usize_to_u8(pat_idx)
                 } else {
                     255 // Disable looping if specified loop frame is out of bounds
                 }
@@ -324,9 +341,9 @@ impl DeltaCompiler {
         features: u8,
     ) -> Vec<u8> {
         let mut header = vec![
-            pattern_size as u8,
-            num_unique as u8,
-            seq_len as u8,
+            usize_to_u8(pattern_size),
+            usize_to_u8(num_unique),
+            usize_to_u8(seq_len),
             loop_pattern,
         ];
         header.extend(timing.frame_rate.hz_value().to_le_bytes());
@@ -341,7 +358,7 @@ impl DeltaCompiler {
         let mut current_offset = 0usize;
         let mut offset_table = Vec::with_capacity(patterns.len() * 4);
         for pat in patterns {
-            offset_table.extend((current_offset as u32).to_le_bytes());
+            offset_table.extend(usize_to_u32(current_offset).to_le_bytes());
             current_offset += pat.len();
         }
         offset_table
@@ -370,18 +387,15 @@ impl DeltaCompiler {
 
         for block in serialized_blocks {
             let position = unique_patterns.iter().position(|x| x == &block);
-            match position {
-                Some(p_idx) => {
-                    sequence_table.push(p_idx as u8);
+            if let Some(p_idx) = position {
+                sequence_table.push(usize_to_u8(p_idx));
+            } else {
+                let new_idx = unique_patterns.len();
+                if new_idx >= 256 {
+                    return None;
                 }
-                None => {
-                    let new_idx = unique_patterns.len();
-                    if new_idx >= 256 {
-                        return None;
-                    }
-                    unique_patterns.push(block);
-                    sequence_table.push(new_idx as u8);
-                }
+                unique_patterns.push(block);
+                sequence_table.push(usize_to_u8(new_idx));
             }
         }
 
@@ -391,7 +405,7 @@ impl DeltaCompiler {
     /// Chunks frames into pattern blocks and serializes each block to delta-mask binary bytes.
     /// Returns `None` if the total number of blocks exceeds the 255 sequence table limit.
     fn serialize_pattern_blocks(
-        frames: &[crate::sequence::YmFrame],
+        frames: &[sequence::YmFrame],
         pattern_size: usize,
         options: &CompilerOptions,
     ) -> Option<Vec<Vec<u8>>> {
@@ -412,12 +426,12 @@ impl DeltaCompiler {
 
     /// Chunks a sequence of frames into blocks of `pattern_size`, padding the final block with silence frames.
     fn chunk_frames_into_patterns(
-        frames: &[crate::sequence::YmFrame],
+        frames: &[sequence::YmFrame],
         pattern_size: usize,
-    ) -> Vec<Vec<crate::sequence::YmFrame>> {
-        let mut chunks: Vec<Vec<crate::sequence::YmFrame>> = frames
+    ) -> Vec<Vec<sequence::YmFrame>> {
+        let mut chunks: Vec<Vec<sequence::YmFrame>> = frames
             .chunks(pattern_size)
-            .map(|chunk| chunk.to_vec())
+            .map(<[sequence::YmFrame]>::to_vec)
             .collect();
 
         if let Some(last) = chunks.last_mut() {
@@ -425,7 +439,7 @@ impl DeltaCompiler {
                 // Pad with silence (volumes = 0) rather than inheriting the last real
                 // frame's state. Without this, a loud noise frame at the song's end
                 // freezes on hardware for the entire padding duration before the loop.
-                let silence = crate::sequence::YmFrame {
+                let silence = sequence::YmFrame {
                     volume_a: Some(0),
                     volume_b: Some(0),
                     volume_c: Some(0),
@@ -440,13 +454,13 @@ impl DeltaCompiler {
 
     /// Serializes a block of frames to binary: compute deltas, apply optional passes, emit bytes.
     fn serialize_ym_block_with_level(
-        frames: &[crate::sequence::YmFrame],
+        frames: &[sequence::YmFrame],
         level: CompressionLevel,
         options: &CompilerOptions,
     ) -> Vec<u8> {
         let deltas = Self::compute_frame_deltas(frames, level);
         let deltas = if options.rle {
-            Self::apply_rle(deltas)
+            Self::apply_rle(&deltas)
         } else {
             deltas
         };
@@ -457,7 +471,7 @@ impl DeltaCompiler {
     /// Collapses runs of idle frames (mask == 0x0000) into 3-byte RLE tokens.
     /// Token format: [0x00, 0x80, N] — represents N+1 consecutive idle frames.
     /// Only emitted for runs of 2 or more (single idle frames are cheaper unencoded).
-    fn apply_rle(deltas: Vec<(u16, Vec<u8>)>) -> Vec<(u16, Vec<u8>)> {
+    fn apply_rle(deltas: &[(u16, Vec<u8>)]) -> Vec<(u16, Vec<u8>)> {
         let mut result = Vec::with_capacity(deltas.len());
         let mut i = 0;
 
@@ -470,7 +484,7 @@ impl DeltaCompiler {
                 }
                 if run >= 2 {
                     // N = run - 1 additional frames beyond the first
-                    result.push((RLE_FLAG, vec![(run - 1) as u8]));
+                    result.push((RLE_FLAG, vec![usize_to_u8(run - 1)]));
                 } else {
                     result.push((mask, payload.clone()));
                 }
@@ -486,7 +500,7 @@ impl DeltaCompiler {
 
     /// Step 1 — convert frames to (mask, payload) pairs using delta encoding.
     fn compute_frame_deltas(
-        frames: &[crate::sequence::YmFrame],
+        frames: &[sequence::YmFrame],
         level: CompressionLevel,
     ) -> Vec<(u16, Vec<u8>)> {
         let mut deltas = Vec::with_capacity(frames.len());
@@ -530,10 +544,10 @@ impl DeltaCompiler {
         data
     }
 
-    /// Converts a high-level [`crate::sequence::YmFrame`] into raw YM2149 14-byte register array.
+    /// Converts a high-level [`sequence::YmFrame`] into raw YM2149 14-byte register array.
     /// `None` fields inherit their value from `prev_registers`, matching `apply_to_chip` semantics.
     fn extract_frame_registers(
-        frame: &crate::sequence::YmFrame,
+        frame: &sequence::YmFrame,
         prev_registers: &[u8; 14],
     ) -> [u8; 14] {
         let mut regs = *prev_registers;
@@ -623,7 +637,7 @@ impl DeltaCompiler {
         // R13 (envelope shape) uses 0xFF as "not written this frame" sentinel.
         // We never inherit from prev for R13 — the encoder must know whether a
         // write actually occurred, not just what the chip state happens to hold.
-        regs[13] = frame.envelope_shape.map(|v| v & 0x0F).unwrap_or(0xFF);
+        regs[13] = frame.envelope_shape.map_or(0xFF, |v| v & 0x0F);
 
         regs
     }

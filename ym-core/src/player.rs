@@ -32,8 +32,8 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len}{msg}",
         )
-        .unwrap()
-        .progress_chars("=>-"),
+            .unwrap()
+            .progress_chars("=>-"),
     );
     pb
 }
@@ -41,6 +41,7 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
 /// Spawns a background thread reading raw key presses and forwarding them over a channel.
 /// `Term::read_key()` blocks, so this thread outlives a single playback session; it exits
 /// once its channel receiver is dropped and the next keypress fails to send.
+#[must_use]
 pub fn spawn_key_listener() -> mpsc::Receiver<Key> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -131,14 +132,105 @@ impl AudioOutputSession {
 type StreamResult = Result<(cpal::Stream, PlaybackProgress, SeekFn), Box<dyn std::error::Error>>;
 
 impl AudioPlayer {
+    fn create_seek_closure<F, Apply>(
+        apply: Apply,
+        frames: Arc<[F]>,
+        state: Arc<Mutex<PlaybackState>>,
+        current_frame: Arc<AtomicUsize>,
+        chip_clock_hz: u32,
+        chip_sample_rate: cpal::SampleRate,
+    ) -> SeekFn
+    where
+        F: Send + Sync + 'static,
+        Apply: Fn(&F, &mut Ym2149, &mut u8, &mut Option<u8>) + Clone + Send + Sync + 'static,
+    {
+        let total_frames = frames.len();
+        Arc::new(move |target_frame: usize| {
+            let target = target_frame.min(total_frames.saturating_sub(1));
+            let mut scratch_chip = Ym2149::with_clocks(chip_clock_hz, chip_sample_rate);
+            let mut mixer = 0x3F;
+            let mut last_env_shape = None;
+            for frame in &frames[..=target] {
+                apply(frame, &mut scratch_chip, &mut mixer, &mut last_env_shape);
+            }
+
+            let mut s = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.chip = scratch_chip;
+            s.frame_idx = target;
+            s.sample_in_frame = 0;
+            s.mixer = mixer;
+            s.last_env_shape = last_env_shape;
+            drop(s);
+            current_frame.store(target, Ordering::Relaxed);
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill_audio_buffer<F, Apply>(
+        data: &mut [f32],
+        s: &mut PlaybackState,
+        frames: &[F],
+        finished_atomic: &AtomicBool,
+        current_frame_atomic: &AtomicUsize,
+        channels: usize,
+        samples_per_frame: usize,
+        loop_start: Option<usize>,
+        apply: &Apply,
+    ) where
+        F: Send + Sync + 'static,
+        Apply: Fn(&F, &mut Ym2149, &mut u8, &mut Option<u8>),
+    {
+        if s.finished {
+            for sample in data.iter_mut() {
+                *sample = 0.0;
+            }
+            finished_atomic.store(true, Ordering::Relaxed);
+            return;
+        }
+
+        let total_frames = frames.len();
+        let mut i = 0;
+        while i < data.len() {
+            let sample_val = s.chip.get_sample();
+            s.chip.clock();
+
+            for c in 0..channels {
+                if i + c < data.len() {
+                    data[i + c] = sample_val;
+                }
+            }
+            i += channels;
+
+            s.sample_in_frame += 1;
+            if s.sample_in_frame >= samples_per_frame {
+                s.sample_in_frame = 0;
+                s.frame_idx += 1;
+
+                if s.frame_idx >= total_frames {
+                    if let Some(l_start) = loop_start {
+                        s.frame_idx = l_start;
+                    } else {
+                        s.finished = true;
+                        finished_atomic.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+
+                let idx = s.frame_idx;
+                apply(&frames[idx], &mut s.chip, &mut s.mixer, &mut s.last_env_shape);
+                current_frame_atomic.store(idx, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Builds and starts a cpal output stream that clocks `chip` and feeds it one
     /// frame of `F` at a time via `apply`, advancing every `samples_per_frame`
     /// samples and looping back to `loop_start` (or finishing) at the end.
     fn build_stream<F, Apply>(
-        sink: AudioSink,
+        sink: &AudioSink,
         samples_per_frame: usize,
         mut chip: Ym2149,
-        frames: Arc<[F]>,
+        frames: &Arc<[F]>,
         loop_start: Option<usize>,
         chip_clock_hz: u32,
         apply: Apply,
@@ -154,9 +246,6 @@ impl AudioPlayer {
         let mut last_env_shape = None;
         apply(&frames[0], &mut chip, &mut mixer, &mut last_env_shape);
 
-        let total_frames = frames.len();
-        let frames_cb = Arc::clone(&frames);
-
         let state = Arc::new(Mutex::new(PlaybackState {
             chip,
             frame_idx: 0,
@@ -171,34 +260,19 @@ impl AudioPlayer {
             finished: Arc::new(AtomicBool::new(false)),
         };
 
-        let seek: SeekFn = {
-            let seek_apply = apply.clone();
-            let seek_frames = Arc::clone(&frames);
-            let seek_state = Arc::clone(&state);
-            let seek_current_frame = Arc::clone(&progress.current_frame);
-            Arc::new(move |target_frame: usize| {
-                let target = target_frame.min(total_frames.saturating_sub(1));
-                let mut scratch_chip = Ym2149::with_clocks(chip_clock_hz, chip_sample_rate);
-                let mut mixer = 0x3F;
-                let mut last_env_shape = None;
-                for frame in seek_frames[..=target].iter() {
-                    seek_apply(frame, &mut scratch_chip, &mut mixer, &mut last_env_shape);
-                }
-
-                let mut s = seek_state.lock().unwrap_or_else(|e| e.into_inner());
-                s.chip = scratch_chip;
-                s.frame_idx = target;
-                s.sample_in_frame = 0;
-                s.mixer = mixer;
-                s.last_env_shape = last_env_shape;
-                drop(s);
-                seek_current_frame.store(target, Ordering::Relaxed);
-            })
-        };
+        let seek = Self::create_seek_closure(
+            apply.clone(),
+            Arc::clone(frames),
+            Arc::clone(&state),
+            Arc::clone(&progress.current_frame),
+            chip_clock_hz,
+            chip_sample_rate,
+        );
 
         let state_cb = Arc::clone(&state);
-        let current_frame_atomic = Arc::clone(&progress.current_frame);
-        let finished_atomic = Arc::clone(&progress.finished);
+        let current_frame_cb = Arc::clone(&progress.current_frame);
+        let finished_cb = Arc::clone(&progress.finished);
+        let frames_cb = Arc::clone(frames);
 
         let channels = sink.channels;
         let err_fn = |err| eprintln!("{} {}", style("Audio stream error:").red().bold(), err);
@@ -207,61 +281,18 @@ impl AudioPlayer {
             cpal::SampleFormat::F32 => sink.device.build_output_stream(
                 sink.stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut s = state_cb.lock().unwrap_or_else(|e| e.into_inner());
-
-                    if s.finished {
-                        for sample in data.iter_mut() {
-                            *sample = 0.0;
-                        }
-                        finished_atomic.store(true, Ordering::Relaxed);
-                        return;
-                    }
-
-                    let mut i = 0;
-                    while i < data.len() {
-                        let sample_val = s.chip.get_sample();
-                        s.chip.clock();
-
-                        for c in 0..channels {
-                            if i + c < data.len() {
-                                data[i + c] = sample_val;
-                            }
-                        }
-                        i += channels;
-
-                        s.sample_in_frame += 1;
-                        if s.sample_in_frame >= samples_per_frame {
-                            s.sample_in_frame = 0;
-                            s.frame_idx += 1;
-
-                            if s.frame_idx >= total_frames {
-                                if let Some(l_start) = loop_start {
-                                    s.frame_idx = l_start;
-                                    let idx = s.frame_idx;
-                                    let s = &mut *s;
-                                    apply(
-                                        &frames_cb[idx],
-                                        &mut s.chip,
-                                        &mut s.mixer,
-                                        &mut s.last_env_shape,
-                                    );
-                                } else {
-                                    s.finished = true;
-                                    finished_atomic.store(true, Ordering::Relaxed);
-                                }
-                            } else {
-                                let idx = s.frame_idx;
-                                let s = &mut *s;
-                                apply(
-                                    &frames_cb[idx],
-                                    &mut s.chip,
-                                    &mut s.mixer,
-                                    &mut s.last_env_shape,
-                                );
-                            }
-                            current_frame_atomic.store(s.frame_idx, Ordering::Relaxed);
-                        }
-                    }
+                    let mut s = state_cb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    Self::fill_audio_buffer(
+                        data,
+                        &mut s,
+                        &frames_cb,
+                        &finished_cb,
+                        &current_frame_cb,
+                        channels,
+                        samples_per_frame,
+                        loop_start,
+                        &apply,
+                    );
                 },
                 err_fn,
                 None,
@@ -273,6 +304,11 @@ impl AudioPlayer {
     }
 
     /// Plays a compiled SFX sequence on the default audio device, blocking until playback finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if opening the host audio output device or initializing
+    /// the audio stream fails.
     pub fn play_sfx(sequence: &SfxSequence) -> Result<(), Box<dyn std::error::Error>> {
         if sequence.frames.is_empty() {
             println!("{}", style("Sequence contains no frames to play.").yellow());
@@ -294,10 +330,10 @@ impl AudioPlayer {
             .unwrap_or(YmChannel::A);
 
         let (stream, progress, _seek) = Self::build_stream(
-            audio.as_sink(),
+            &audio.as_sink(),
             samples_per_frame,
             chip,
-            frames,
+            &frames,
             None,
             sequence.source_clock,
             move |frame: &SfxFrame, chip, mixer, _| frame.apply_to_chip(chip, mixer, channel),
@@ -314,12 +350,17 @@ impl AudioPlayer {
             channel
         );
 
-        Self::monitor_frame_progress(progress, total_frames, false, None)?;
+        Self::monitor_frame_progress(&progress, total_frames, false, None);
         std::thread::sleep(Duration::from_millis(100)); // drain queued buffer
         Ok(())
     }
 
     /// Plays a compiled song sequence on the default audio device, blocking until playback finishes (or loops indefinitely).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if opening the host audio output device or initializing
+    /// the audio stream fails.
     pub fn play(sequence: &YmSequence) -> Result<(), Box<dyn std::error::Error>> {
         if sequence.frames.is_empty() {
             println!("{}", style("Sequence contains no frames to play.").yellow());
@@ -336,14 +377,14 @@ impl AudioPlayer {
         let loop_start_val = sequence.loop_start;
 
         let (stream, progress, seek) = Self::build_stream(
-            audio.as_sink(),
+            &audio.as_sink(),
             samples_per_frame,
             chip,
-            frames,
+            &frames,
             loop_start_val,
             sequence.timing.master_clock_hz,
             |frame: &YmFrame, chip, mixer, last_env_shape| {
-                frame.apply_to_chip(chip, mixer, last_env_shape)
+                frame.apply_to_chip(chip, mixer, last_env_shape);
             },
         )?;
 
@@ -359,11 +400,11 @@ impl AudioPlayer {
 
         let seek_step_frames = ((hz as usize) * SEEK_STEP_SECONDS as usize).max(1);
         Self::monitor_frame_progress(
-            progress,
+            &progress,
             total_frames,
             loop_start_val.is_some(),
-            Some((seek, seek_step_frames)),
-        )?;
+            Some(&(seek, seek_step_frames)),
+        );
         if loop_start_val.is_none() {
             std::thread::sleep(Duration::from_millis(100)); // drain queued buffer
         }
@@ -371,6 +412,11 @@ impl AudioPlayer {
     }
 
     /// Plays raw YM chiptune data via the ym2149 replayer, blocking for the song's duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decompressing YM data, parsing YM registers, or
+    /// initializing the host audio output device fails.
     pub fn play_ym_data(ym_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         use ym2149_common::ChiptunePlayerBase;
         use ym2149_ym_replayer::player::PlaybackController;
@@ -405,7 +451,7 @@ impl AudioPlayer {
             cpal::SampleFormat::F32 => audio.device.build_output_stream(
                 audio.stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut player = player_cb.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut player = player_cb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                     let needed_len = (data.len() / audio.channels).min(temp_buf.len());
                     let slice = &mut temp_buf[..needed_len];
@@ -431,30 +477,32 @@ impl AudioPlayer {
 
         stream.play()?;
 
-        let duration = player_mutex
-            .lock()
-            .map_err(|_| "player mutex poisoned")?
-            .duration_seconds() as f64;
+        let duration = f64::from(
+            player_mutex
+                .lock()
+                .map_err(|_| "player mutex poisoned")?
+                .duration_seconds(),
+        );
         println!("{} {:.1}s", style("PLAYING SONG:").bold().green(), duration);
 
-        Self::monitor_time_progress(duration)?;
+        Self::monitor_time_progress(duration);
         Ok(())
     }
 
     /// Computes target audio samples per frame given system sample rate and target Hz.
     fn calculate_samples_per_frame(sample_rate: cpal::SampleRate, hz: u32) -> usize {
         let hz_valid = hz.max(1);
-        (sample_rate as f64 / hz_valid as f64).round() as usize
+        (f64::from(sample_rate) / f64::from(hz_valid)).round() as usize
     }
 
     /// Monitors frame-based playback (SFX or Song) with a terminal progress bar lock-freely.
     /// When `seek` is set, left/right arrow keys jump playback by the given number of frames.
     fn monitor_frame_progress(
-        progress: PlaybackProgress,
+        progress: &PlaybackProgress,
         total_frames: usize,
         is_looping: bool,
-        seek: Option<(SeekFn, usize)>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        seek: Option<&(SeekFn, usize)>,
+    ) {
         let pb = frame_progress_bar(total_frames as u64);
 
         // `read_key()` on a non-tty stdout returns `Ok(Key::Unknown)` immediately rather than
@@ -495,7 +543,7 @@ impl AudioPlayer {
                                 seek_fn(current.saturating_sub(*step));
                             }
                         }
-                        Key::Char('q') | Key::Char('Q') => {
+                        Key::Char('q' | 'Q') => {
                             progress.finished.store(true, Ordering::Relaxed);
                         }
                         _ => {}
@@ -520,12 +568,10 @@ impl AudioPlayer {
         if key_rx.is_some() {
             let _ = std::process::Command::new("stty").arg("sane").status();
         }
-
-        Ok(())
     }
 
     /// Monitors elapsed-time playback for raw YM files.
-    fn monitor_time_progress(duration: f64) -> Result<(), Box<dyn std::error::Error>> {
+    fn monitor_time_progress(duration: f64) {
         let total_deciseconds = (duration * 10.0).round().max(1.0) as u64;
         let pb = time_progress_bar(total_deciseconds);
 
@@ -533,10 +579,9 @@ impl AudioPlayer {
         while start.elapsed().as_secs_f64() < duration {
             let elapsed = start.elapsed().as_secs_f64();
             pb.set_position(((elapsed * 10.0).round() as u64).min(total_deciseconds));
-            pb.set_message(format!("{:.1}s / {:.1}s", elapsed, duration));
+            pb.set_message(format!("{elapsed:.1}s / {elapsed:.1}s"));
             std::thread::sleep(Duration::from_millis(100));
         }
         pb.finish_and_clear();
-        Ok(())
     }
 }

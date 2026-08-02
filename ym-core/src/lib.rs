@@ -19,7 +19,7 @@ mod tests {
     fn test_timing_defaults() {
         let hz = SystemHz::Hz50;
         assert_eq!(hz.hz_value(), 50);
-        assert_eq!(hz.frame_duration_ms(), 20.0);
+        assert!((hz.frame_duration_ms() - 20.0).abs() < f64::EPSILON);
 
         let hz60 = SystemHz::Hz60;
         assert_eq!(hz60.hz_value(), 60);
@@ -160,9 +160,9 @@ mod tests {
     fn test_song_compilation_and_parsing() {
         let mut frames = Vec::new();
         // Create 70 frames to span beyond a 64-frame pattern block
-        for i in 0..70 {
+        for i in 0u16..70u16 {
             frames.push(YmFrame {
-                tone_a: Some(200 + i as u16),
+                tone_a: Some(200 + i),
                 volume_a: Some(15),
                 tone_enable_a: Some(true),
                 ..Default::default()
@@ -182,12 +182,12 @@ mod tests {
         };
 
         let compiler = DeltaCompiler::new();
-        let compiled = compiler
+        let details = compiler
             .compile_song(&song, CompressionLevel::Full, &CompilerOptions::default())
             .unwrap();
-        let ysg_bytes = compiled.bytes;
+        let ysg_bytes = details.bytes;
 
-        let chosen_size = compiled.pattern_size;
+        let chosen_size = details.pattern_size;
         assert_eq!(ysg_bytes[0] as usize, chosen_size);
         let seq_len = ysg_bytes[2] as usize;
 

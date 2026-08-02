@@ -33,6 +33,7 @@ pub enum SystemHz {
 
 impl SystemHz {
     /// Returns numerical refresh rate in Hz.
+    #[must_use]
     pub fn hz_value(&self) -> u32 {
         match self {
             SystemHz::Hz50 => 50,
@@ -42,8 +43,9 @@ impl SystemHz {
     }
 
     /// Computes duration of a single frame in milliseconds.
+    #[must_use]
     pub fn frame_duration_ms(&self) -> f64 {
-        1000.0 / (self.hz_value().max(1) as f64)
+        1000.0 / f64::from(self.hz_value().max(1))
     }
 }
 
@@ -53,9 +55,10 @@ impl SystemHz {
 /// (`x`, ~5 cycles/iteration), after subtracting a fixed ~1800-cycle
 /// per-frame processing overhead. Ported from the original C# player-tuning
 /// tool's `CalculateDelay`.
+#[must_use]
 pub fn calculate_delay(hz: u32) -> (u32, u8) {
     let hz_valid = hz.max(1);
-    let remaining = (ATARI_7800_CLOCK as f64 / hz_valid as f64 - 1800.0).max(0.0);
+    let remaining = (f64::from(ATARI_7800_CLOCK) / f64::from(hz_valid) - 1800.0).max(0.0);
     let y_raw = (remaining / 1285.0).floor();
     let x = ((remaining - y_raw * 1285.0) / 5.0)
         .round()

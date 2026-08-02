@@ -32,3 +32,6 @@ assets = [
     { source = "../README.md", dest = "/usr/share/doc/lym/README.md", mode = "0644" },
     { source = "../LICENSE", dest = "/usr/share/doc/lym/LICENSE", mode = "0644" }
 ]
+
+[lints]
+workspace = true

@@ -47,7 +47,12 @@ struct YsgHeader {
 }
 
 impl YmSequence {
-    /// Deserializes a compiled .ysg binary stream into a YmSequence.
+    /// Deserializes a compiled .ysg binary stream into a `YmSequence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if header validation fails, sequence table offsets are invalid,
+    /// or the byte payload is truncated before pattern data ends.
     pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let header = Self::parse_ysg_header(bytes)?;
 
@@ -163,7 +168,7 @@ impl YmSequence {
                     "Sequence index {} out of range (max {})",
                     pattern_idx, header.num_unique
                 )
-                .into());
+                    .into());
             }
             let start_ptr = pattern_data_start + offsets[pattern_idx];
             if start_ptr >= bytes.len() {
@@ -206,7 +211,7 @@ impl YmSequence {
             if pp + 1 >= bytes.len() {
                 return Err("Unexpected EOF in YSG pattern data".into());
             }
-            let mask = bytes[pp] as u16 | ((bytes[pp + 1] as u16) << 8);
+            let mask = u16::from(bytes[pp]) | (u16::from(bytes[pp + 1]) << 8);
             pp += 2;
 
             if Self::is_rle_token(mask, rle_enabled) {
@@ -258,9 +263,9 @@ impl YmSequence {
         reg_14[1] &= 0x0F; // R1 bits 4-7 unused
         reg_14[3] &= 0x0F; // R3 bits 4-7 unused
         reg_14[5] &= 0x0F; // R5 bits 4-7 unused
-                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
-                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
-                           // chip — silence those channels to prevent false envelope-mode triggering.
+        // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
+        // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
+        // chip — silence those channels to prevent false envelope-mode triggering.
         let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
         if reg_14[8] > 0x1F {
             reg_14[8] = 0;
@@ -274,17 +279,17 @@ impl YmSequence {
         (reg_14, has_digidrum)
     }
 
-    /// Converts 14 YM-2149 hardware registers to a YmFrame.
+    /// Converts 14 YM-2149 hardware registers to a `YmFrame`.
     fn registers_to_frame(registers: &[u8; 14]) -> YmFrame {
-        let tone_a = registers[0] as u16 | ((registers[1] as u16) << 8);
-        let tone_b = registers[2] as u16 | ((registers[3] as u16) << 8);
-        let tone_c = registers[4] as u16 | ((registers[5] as u16) << 8);
+        let tone_a = u16::from(registers[0]) | (u16::from(registers[1]) << 8);
+        let tone_b = u16::from(registers[2]) | (u16::from(registers[3]) << 8);
+        let tone_c = u16::from(registers[4]) | (u16::from(registers[5]) << 8);
         let noise_period = registers[6];
         let mixer = registers[7];
         let volume_a = registers[8];
         let volume_b = registers[9];
         let volume_c = registers[10];
-        let env_period = registers[11] as u16 | ((registers[12] as u16) << 8);
+        let env_period = u16::from(registers[11]) | (u16::from(registers[12]) << 8);
         let env_shape = registers[13];
 
         YmFrame {
@@ -307,9 +312,13 @@ impl YmSequence {
         }
     }
 
-    /// Decodes raw .ym chiptune data into a YmSequence.
+    /// Decodes raw .ym chiptune data into a `YmSequence`.
     /// Returns the sequence and the number of frames where digi-drum sample values
     /// were detected and silenced (YM6 only). Callers should warn the user when > 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if LHA decompression fails or the YM register stream format is invalid.
     pub fn from_ym_data(
         name: &str,
         ym_data: &[u8],
@@ -324,7 +333,7 @@ impl YmSequence {
             source_clock_override.unwrap_or_else(|| Self::detect_ym_source_clock(&decompressed));
 
         let target_clock = 1_789_773u32;
-        let ratio = target_clock as f64 / source_clock as f64;
+        let ratio = f64::from(target_clock) / f64::from(source_clock);
         let apply_scaling = (ratio - 1.0).abs() > 0.0001;
 
         // YM2 / YM3 format: interleaved register data (all R0 values, then all R1, ...) at 50 Hz.
@@ -450,12 +459,21 @@ impl YmSequence {
     /// Byte length of `ym_data` after decompression (e.g. from LHA-compressed
     /// `.ym` files), before any lokey-ym-tools recompilation. Useful for reporting
     /// how much smaller a compiled `.ysg` is than the source register stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if LHA decompression of `ym_data` fails.
     pub fn ym_decompressed_len(ym_data: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
         use ym2149_ym_replayer::decompress_if_needed;
         Ok(decompress_if_needed(ym_data)?.len())
     }
 
-    /// Loads a YmSequence from a file path (.ysg, .ym, or .json).
+    /// Loads a `YmSequence` from a file path (.ysg, .ym, or .json).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the target file from disk fails, or if decoding the
+    /// sequence format fails.
     pub fn load_from_path(
         input: &std::path::Path,
         clock_override: Option<u32>,
@@ -478,10 +496,8 @@ impl YmSequence {
                 Ok(seq)
             }
             _ => Err(format!(
-                "Unsupported song file extension '.{}'. Expected .ysg, .ym, or .json",
-                extension
-            )
-            .into()),
+                "Unsupported song file extension '.{extension}'. Expected .ysg, .ym, or .json")
+                .into()),
         }
     }
 }
@@ -599,19 +615,19 @@ impl YmFrame {
             1.0
         };
         if let Some(t) = self.tone_a {
-            self.tone_a = Some((t as f64 * ratio).round().clamp(0.0, 4095.0) as u16);
+            self.tone_a = Some((f64::from(t) * ratio).round().clamp(0.0, 4095.0) as u16);
         }
         if let Some(t) = self.tone_b {
-            self.tone_b = Some((t as f64 * ratio).round().clamp(0.0, 4095.0) as u16);
+            self.tone_b = Some((f64::from(t) * ratio).round().clamp(0.0, 4095.0) as u16);
         }
         if let Some(t) = self.tone_c {
-            self.tone_c = Some((t as f64 * ratio).round().clamp(0.0, 4095.0) as u16);
+            self.tone_c = Some((f64::from(t) * ratio).round().clamp(0.0, 4095.0) as u16);
         }
         if let Some(n) = self.noise_period {
-            self.noise_period = Some(((n & 0x1F) as f64 * ratio).round().clamp(0.0, 31.0) as u8);
+            self.noise_period = Some((f64::from(n & 0x1F) * ratio).round().clamp(0.0, 31.0) as u8);
         }
         if let Some(e) = self.envelope_period {
-            self.envelope_period = Some((e as f64 * ratio).round().clamp(0.0, 65535.0) as u16);
+            self.envelope_period = Some((f64::from(e) * ratio).round().clamp(0.0, 65535.0) as u16);
         }
     }
 }
@@ -637,6 +653,7 @@ pub struct SfxFrame {
 }
 
 impl SfxFrame {
+    #[must_use]
     pub fn new(
         tone_enable: bool,
         noise_enable: bool,
@@ -733,7 +750,11 @@ impl SfxFrame {
 }
 
 impl SfxSequence {
-    /// Parses an AYFX CSV text export into an SfxSequence.
+    /// Parses an AYFX CSV text export into an `SfxSequence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if CSV parsing fails or mandatory column fields are missing.
     pub fn from_ayfx_csv(name: &str, content: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut frames = Vec::new();
         for (line_num, line) in content.lines().enumerate() {
@@ -741,14 +762,14 @@ impl SfxSequence {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+            let parts: Vec<&str> = line.split(',').map(str::trim).collect();
             if parts.len() < 5 {
                 return Err(format!(
                     "Line {}: expected at least 5 columns, found {}",
                     line_num + 1,
                     parts.len()
                 )
-                .into());
+                    .into());
             }
 
             let t = parts[0].parse::<i32>()? != 0;
@@ -782,7 +803,11 @@ impl SfxSequence {
         })
     }
 
-    /// Parses an AYFX bank binary into a list of SfxSequences.
+    /// Parses an AYFX bank binary into a list of `SfxSequences`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the binary payload is empty or offset table pointers are truncated.
     pub fn from_ayfx_bank(bank_data: &[u8]) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
         if bank_data.is_empty() {
             return Err("Empty bank data".into());
@@ -797,7 +822,7 @@ impl SfxSequence {
                 break;
             }
             let offset_val =
-                (bank_data[offset_ptr] as u16 | ((bank_data[offset_ptr + 1] as u16) << 8)) as usize;
+                (u16::from(bank_data[offset_ptr]) | (u16::from(bank_data[offset_ptr + 1]) << 8)) as usize;
             let start_idx = 2 + i * 2 + offset_val;
             if start_idx >= bank_data.len() {
                 continue;
@@ -840,7 +865,7 @@ impl SfxSequence {
             let next_ptr = 3 + i * 2;
             if next_ptr + 1 < bank_data.len() {
                 let next_offset_val =
-                    (bank_data[next_ptr] as u16 | ((bank_data[next_ptr + 1] as u16) << 8)) as usize;
+                    (u16::from(bank_data[next_ptr]) | (u16::from(bank_data[next_ptr + 1]) << 8)) as usize;
                 let next_start_idx = 4 + i * 2 + next_offset_val;
                 if next_start_idx <= bank_data.len() {
                     if let Some(diff) = next_start_idx.checked_sub(start_idx) {
@@ -876,7 +901,11 @@ impl SfxSequence {
         format!("sfx_{}", fallback_idx + 1)
     }
 
-    /// Parses a single AYFX effect binary into an SfxSequence.
+    /// Parses a single AYFX effect binary into an `SfxSequence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if frame decoding fails.
     pub fn from_ayfx_effect(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let (frames, _) = Self::decode_ayfx_frames(bytes);
 
@@ -907,7 +936,7 @@ impl SfxSequence {
                 if pp + 1 >= end_limit {
                     break;
                 }
-                tone = (bytes[pp] as u16 | ((bytes[pp + 1] as u16) << 8)) & 0xFFF;
+                tone = (u16::from(bytes[pp]) | (u16::from(bytes[pp + 1]) << 8)) & 0xFFF;
                 pp += 2;
             }
             if (it & (1 << 6)) != 0 {
@@ -933,7 +962,11 @@ impl SfxSequence {
         (frames, pp)
     }
 
-    /// Parses compiled .yfx binary data into an SfxSequence.
+    /// Parses compiled .yfx binary data into an `SfxSequence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the binary size is not a multiple of 5 bytes.
     pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         if !bytes.len().is_multiple_of(5) {
             return Err("YFX file size must be a multiple of 5".into());
@@ -965,7 +998,7 @@ impl SfxSequence {
             let duration = bytes[pp + 4];
             pp += 5;
 
-            let tone = tone_low as u16 | ((tone_high as u16) << 8);
+            let tone = u16::from(tone_low) | (u16::from(tone_high) << 8);
             let tone_enable = (control & 0x01) != 0;
             let noise_enable = (control & 0x02) != 0;
             let noise = (control >> 3) & 0x1F;
@@ -983,7 +1016,11 @@ impl SfxSequence {
         frames
     }
 
-    /// Loads a single SfxSequence from a file path (.yfx, .json, .csv, .afx, or .afb).
+    /// Loads a single `SfxSequence` from a file path (.yfx, .json, .csv, .afx, or .afb).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the file fails or the file extension is unsupported.
     pub fn load_from_path(
         input: &std::path::Path,
         bank_index: usize,
@@ -1018,14 +1055,16 @@ impl SfxSequence {
                 Ok(serde_json::from_str(&content)?)
             }
             _ => Err(format!(
-                "Unsupported SFX file extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
-                extension
-            )
-            .into()),
+                "Unsupported SFX file extension '.{extension}'. Expected .yfx, .json, .csv, .afx, or .afb")
+                .into()),
         }
     }
 
-    /// Loads all SfxSequences from a list of file paths.
+    /// Loads all `SfxSequences` from a list of file paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading any target file fails or decoding any sequence fails.
     pub fn load_all_from_paths(
         inputs: &[std::path::PathBuf],
     ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
@@ -1058,10 +1097,8 @@ impl SfxSequence {
                 }
                 _ => {
                     return Err(format!(
-                    "Unsupported SFX extension '.{}'. Expected .yfx, .json, .csv, .afx, or .afb",
-                    extension
-                )
-                    .into())
+                        "Unsupported SFX extension '.{extension}'. Expected .yfx, .json, .csv, .afx, or .afb")
+                        .into())
                 }
             }
         }

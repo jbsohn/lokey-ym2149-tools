@@ -15,4 +15,5 @@ ym2149-common.workspace = true
 indicatif.workspace = true
 console.workspace = true
 
-
+[lints]
+workspace = true
