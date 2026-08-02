@@ -48,6 +48,12 @@ reset:
         ldx #$FF
         txs
 
+        ; Lock INPTCTRL to 7800 mode and clear TIA VBLANK dump bit
+        lda #$07
+        sta PTCTRL
+        lda #$00
+        sta PTCTRL
+
         ; Clear ZP & SFX vars
         lda #0
         sta SFX_PTR_L
@@ -66,10 +72,6 @@ cl_ym:  stx AY_ADDR
 
         ; Initialize background music player
         jsr init_music
-
-        ; Set background color to dark blue ($06)
-        lda #$06
-        sta BKGRND
 
 main_loop:
         jsr sync_vbi
@@ -117,13 +119,14 @@ v2:     bit MSTAT
         rts
 
 ; ----------------------------------------------------------
-; Poll Joystick 1 Fire Button (INPT4, Active Low)
+; check_fire_button -- trigger SFX when fire button pressed
+; ----------------------------------------------------------
 check_fire_button:
-        bit INPT4
+        bit INPT4               ; Bit 7 = 0 when pressed, 1 when released
         bmi fire_not_pressed
 
         lda PREV_FIRE
-        bne fire_already_down
+        bne fire_done
 
         lda #1
         sta PREV_FIRE
@@ -133,11 +136,12 @@ check_fire_button:
 fire_not_pressed:
         lda #0
         sta PREV_FIRE
-fire_already_down:
+fire_done:
         rts
 
 ; ----------------------------------------------------------
-; Trigger SFX (Point sfx_ptr to sfx_data)
+; trigger_sfx -- point sfx_ptr to sfx_data
+; ----------------------------------------------------------
 trigger_sfx:
         lda #<sfx_data
         sta SFX_PTR_L
@@ -145,12 +149,12 @@ trigger_sfx:
         sta SFX_PTR_H
         lda #1
         sta SFX_ACTIVE
-        lda #1                  ; Start immediately on frame 0
         sta SFX_DELAY
         rts
 
 ; ----------------------------------------------------------
-; Update Active SFX Overlay (Channel C Override)
+; update_sfx_overlay -- overlay SFX on Channel C registers
+; ----------------------------------------------------------
 update_sfx_overlay:
         lda SFX_ACTIVE
         beq sfx_done
@@ -158,42 +162,31 @@ update_sfx_overlay:
         dec SFX_DELAY
         bne sfx_done
 
-        ; Read 5-byte YFX frame: [ToneL, ToneH, Vol, Control, Duration]
-        ldy #0
-        lda (SFX_PTR_L),y       ; Tone Low
-        ldy #1
-        lda (SFX_PTR_L),y       ; Tone High
-        ldy #2
-        lda (SFX_PTR_L),y       ; Volume
-        ldy #3
-        lda (SFX_PTR_L),y       ; Control
         ldy #4
-        lda (SFX_PTR_L),y       ; Duration
-
-        cmp #0
+        lda (SFX_PTR_L),y       ; Duration byte
         beq stop_sfx            ; Duration 0 -> End of SFX
 
         sta SFX_DELAY
 
         ; Write Channel C Tone Low (R4)
+        lda #4
+        sta AY_ADDR
         ldy #0
         lda (SFX_PTR_L),y
-        ldx #4
-        stx AY_ADDR
         sta AY_DATA
 
         ; Write Channel C Tone High (R5)
+        lda #5
+        sta AY_ADDR
         ldy #1
         lda (SFX_PTR_L),y
-        ldx #5
-        stx AY_ADDR
         sta AY_DATA
 
         ; Write Channel C Volume (R10)
+        lda #10
+        sta AY_ADDR
         ldy #2
         lda (SFX_PTR_L),y
-        ldx #10
-        stx AY_ADDR
         sta AY_DATA
 
         ; Advance SFX pointer by 5 bytes
@@ -201,18 +194,18 @@ update_sfx_overlay:
         lda SFX_PTR_L
         adc #5
         sta SFX_PTR_L
-        bcc sfx_done
-        inc SFX_PTR_H
+        lda SFX_PTR_H
+        adc #0
+        sta SFX_PTR_H
         rts
 
 stop_sfx:
         lda #0
         sta SFX_ACTIVE
-        ; Mute Channel C volume (R10)
-        ldx #10
-        stx AY_ADDR
+        lda #10
+        sta AY_ADDR
         lda #0
-        sta AY_DATA
+        sta AY_DATA             ; Mute Channel C volume
 sfx_done:
         rts
 
@@ -290,6 +283,7 @@ play_frame:
         cmp seq_len
         bcc load_pattern
 
+        ; Sequence exhausted — loop or restart
         lda loop_pat
         cmp #$FF
         bne do_loop
