@@ -29,17 +29,17 @@ $(BUILD_DIR)/pew-x.yfx: $(SFX_SRC) | $(BUILD_DIR)
 	@$(LYM) sfx render --input $< --output $@ --index 0
 
 # Generate music data module assembly
-$(BUILD_DIR)/music.asm: $(BUILD_DIR)/song.ysg
+$(BUILD_DIR)/music.s: $(BUILD_DIR)/song.ysg
 	@printf '.segment "RODATA"\n.export music_data\nmusic_data:\n    .incbin "%s"\n' "$<" > $@
 
 # Assemble music data module
-$(BUILD_DIR)/music.o: $(BUILD_DIR)/music.asm
+$(BUILD_DIR)/music.o: $(BUILD_DIR)/music.s
 	@$(CA65) $< -o $@
 
-# Assemble 6502 main.asm
-$(BUILD_DIR)/main.o: main.asm $(BUILD_DIR)/pew-x.yfx maria.inc ym2149.inc ysg.inc | $(BUILD_DIR)
-	@echo "  Assembling 6502 main.asm..."
-	@$(CA65) -I . -I $(BUILD_DIR) main.asm -o $@
+# Assemble 6502 main.s
+$(BUILD_DIR)/main.o: main.s $(BUILD_DIR)/pew-x.yfx ../include/maria.inc ../include/ym2149.inc ysg.inc | $(BUILD_DIR)
+	@echo "  Assembling 6502 main.s..."
+	@$(CA65) -I . -I ../include -I $(BUILD_DIR) main.s -o $@
 
 # Link into raw 32KB ROM
 $(BUILD_DIR)/sample.bin: $(BUILD_DIR)/main.o $(BUILD_DIR)/music.o | $(BUILD_DIR)

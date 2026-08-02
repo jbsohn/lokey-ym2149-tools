@@ -1,6 +1,6 @@
 ; ============================================================
-; maria.inc -- Atari 7800
-; Compatible with DASM and MADS
+; maria.inc -- Atari 7800 Hardware Defines
+; Compatible with DASM, MADS, and ca65
 ; ============================================================
 
 ; --- TIA Registers ---

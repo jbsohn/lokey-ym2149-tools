@@ -1,10 +1,10 @@
 ; =========================================================
-; ysg_player.asm -- YSG Music Player for Atari 7800
+; ysg_player.s -- YSG Music Player for Atari 7800
 ; ca65 / cc65 toolchain
 ; =========================================================
 ; Build (example):
-;   ca65 ysg_player.asm -o player.o
-;   ca65 music.asm -o music.o          ; see music.asm.template
+;   ca65 ysg_player.s -o player.o
+;   ca65 music.s -o music.o          ; see music.s.template
 ;   ld65 -C 7800.cfg player.o music.o -o game.bin
 ; =========================================================
 

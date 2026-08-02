@@ -8,7 +8,7 @@ LYM          ?= ../../../target/release/lym
 A78TOOL      ?= a78tool
 CA65         := ca65
 LD65         := ld65
-CA65_FLAGS   := -I.
+CA65_FLAGS   := -I. -I../include
 LD65_FLAGS   := -C 7800.cfg
 SIGN         := 7800sign
 YSG_MAX_BYTES ?= 28672
@@ -59,17 +59,17 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
 
 # --- Assemble player once — music_data is imported from the per-song music module ---
 
-$(BUILD_DIR)/player.o: ysg_player.asm ysg.inc | $(BUILD_DIR)
+$(BUILD_DIR)/player.o: ysg_player.s ysg.inc | $(BUILD_DIR)
 	@echo "  Assembling player"
 	@$(CA65) $(CA65_FLAGS) $< -o $@
 
 # --- Generate and assemble per-song music module ---
 
-$(BUILD_DIR)/%.music.asm: $(BUILD_DIR)/%.ysg
+$(BUILD_DIR)/%.music.s: $(BUILD_DIR)/%.ysg
 	@printf '.segment "RODATA"\n.export music_data\nmusic_data:\n    .incbin "%s"\n' \
 		"$(BUILD_DIR)/$*.ysg" > $@
 
-$(BUILD_DIR)/%.music.o: $(BUILD_DIR)/%.music.asm
+$(BUILD_DIR)/%.music.o: $(BUILD_DIR)/%.music.s
 	@$(CA65) $(CA65_FLAGS) $< -o $@
 
 # --- Link player + music into ROM ---

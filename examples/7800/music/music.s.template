@@ -1,8 +1,8 @@
 ; ============================================================
-; music.asm -- Per-song data module for ysg_player
+; music.s -- Per-song data module for ysg_player
 ;
 ; Copy this file for each song, fill in the paths, then:
-;   ca65 music.asm -o music.o
+;   ca65 music.s -o music.o
 ;   ld65 -C 7800.cfg player.o music.o -o game.bin
 ;
 ; Generated .ysi constants are scoped to the song name:

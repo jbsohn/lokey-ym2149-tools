@@ -1,5 +1,5 @@
 ; =========================================================
-; main.asm -- Atari 7800 Background Music + SFX Fire Demo
+; main.s -- Atari 7800 Background Music + SFX Fire Demo
 ; ca65 / cc65 toolchain
 ; =========================================================
 
