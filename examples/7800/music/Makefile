@@ -18,11 +18,17 @@ YSG_FILES   := $(foreach f,$(YM_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f)))
 ROM_FILES   := $(YSG_FILES:.ysg=.rom)
 A78_FILES   := $(YSG_FILES:.ysg=.a78)
 
-.PHONY: all ysg clean help
+.PHONY: all ysg clean help ensure-lym
 .DELETE_ON_ERROR:
 .PRECIOUS: $(BUILD_DIR)/player.o $(BUILD_DIR)/%.music.o $(BUILD_DIR)/%.bin $(BUILD_DIR)/%.rom
 
-all: $(A78_FILES)
+all: ensure-lym $(A78_FILES)
+
+ensure-lym:
+	@if [ ! -f "$(LYM)" ]; then \
+		echo "  Building 'lym' release binary with Cargo..."; \
+		(cd ../../.. && cargo build --release --bin lym); \
+	fi
 
 ysg: $(YSG_FILES)
 

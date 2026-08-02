@@ -11,9 +11,15 @@ SIGN         := 7800sign
 SONG_SRC     := ../../../tests/fixtures/song/ND-Loader.ym
 SFX_SRC      := ../../../tests/fixtures/sfx/pew-x.afb
 
-.PHONY: all clean help
+.PHONY: all clean help ensure-lym
 
-all: $(BUILD_DIR)/sample.a78
+all: ensure-lym $(BUILD_DIR)/sample.a78
+
+ensure-lym:
+	@if [ ! -f "$(LYM)" ]; then \
+		echo "  Building 'lym' release binary with Cargo..."; \
+		(cd ../../.. && cargo build --release --bin lym); \
+	fi
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)

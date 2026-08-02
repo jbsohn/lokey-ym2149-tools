@@ -1,5 +1,6 @@
 # Cargo / Rust build artifacts
 /target/
+**/build/
 
 # Generated backup files
 **/*.rs.bk
