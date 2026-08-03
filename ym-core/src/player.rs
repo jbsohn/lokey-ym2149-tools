@@ -32,8 +32,8 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len}{msg}",
         )
-            .unwrap()
-            .progress_chars("=>-"),
+        .unwrap()
+        .progress_chars("=>-"),
     );
     pb
 }
@@ -154,7 +154,9 @@ impl AudioPlayer {
                 apply(frame, &mut scratch_chip, &mut mixer, &mut last_env_shape);
             }
 
-            let mut s = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut s = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.chip = scratch_chip;
             s.frame_idx = target;
             s.sample_in_frame = 0;
@@ -217,7 +219,12 @@ impl AudioPlayer {
                 }
 
                 let idx = s.frame_idx;
-                apply(&frames[idx], &mut s.chip, &mut s.mixer, &mut s.last_env_shape);
+                apply(
+                    &frames[idx],
+                    &mut s.chip,
+                    &mut s.mixer,
+                    &mut s.last_env_shape,
+                );
                 current_frame_atomic.store(idx, Ordering::Relaxed);
             }
         }
@@ -281,7 +288,9 @@ impl AudioPlayer {
             cpal::SampleFormat::F32 => sink.device.build_output_stream(
                 sink.stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut s = state_cb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut s = state_cb
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     Self::fill_audio_buffer(
                         data,
                         &mut s,
@@ -451,7 +460,9 @@ impl AudioPlayer {
             cpal::SampleFormat::F32 => audio.device.build_output_stream(
                 audio.stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut player = player_cb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut player = player_cb
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                     let needed_len = (data.len() / audio.channels).min(temp_buf.len());
                     let slice = &mut temp_buf[..needed_len];

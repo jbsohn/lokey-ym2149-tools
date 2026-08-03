@@ -20,6 +20,7 @@ use ym_core::{
     about = "Lokey YM-2149 Command Line Toolchain",
     long_about = "A unified CLI tool for compiling, auditioning, and interactively mixing music songs and sound effects targeting the Yamaha YM-2149 Programmable Sound Generator."
 )]
+
 struct LymCli {
     #[command(subcommand)]
     command: MainCommands,
@@ -465,7 +466,11 @@ fn run_song_render(
         sequence.timing.frame_rate = hz_override.into();
     } else if step > 1 {
         let current_hz = sequence.timing.frame_rate.hz_value();
-        let decimated_hz = f64_to_u32((f64::from(current_hz) / usize_to_f64(step)).round().max(1.0));
+        let decimated_hz = f64_to_u32(
+            (f64::from(current_hz) / usize_to_f64(step))
+                .round()
+                .max(1.0),
+        );
         sequence.timing.frame_rate = SystemHz::Custom(decimated_hz);
     }
 
@@ -488,18 +493,13 @@ fn run_song_render(
                 let pattern_size = compiled_song.pattern_size;
                 let current_patterns = sequence.frames.len() / pattern_size;
                 if current_patterns == 0 {
-                    return Err(
-                        "Cannot fit even one pattern within --max-bytes limit".into()
-                    );
+                    return Err("Cannot fit even one pattern within --max-bytes limit".into());
                 }
                 sequence
                     .frames
                     .truncate((current_patterns - 1) * pattern_size);
-                compiled_song = compiler.compile_song(
-                    &sequence,
-                    compression_level,
-                    &compiler_options,
-                )?;
+                compiled_song =
+                    compiler.compile_song(&sequence, compression_level, &compiler_options)?;
                 if compiled_song.bytes.len() <= limit {
                     break;
                 }
@@ -618,10 +618,9 @@ fn run_song_play(
     } else if via_sequence && extension.eq_ignore_ascii_case("ym") {
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
         let ym_data = fs::read(input)?;
-        let (mut sequence, _) =
-            with_spinner("Decoding YM via YmSequence pipeline...", || {
-                YmSequence::from_ym_data(name, &ym_data, None)
-            })?;
+        let (mut sequence, _) = with_spinner("Decoding YM via YmSequence pipeline...", || {
+            YmSequence::from_ym_data(name, &ym_data, None)
+        })?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = hz_override.into();
         }
@@ -782,8 +781,11 @@ fn run_mix(
     let stream_config: cpal::StreamConfig = config.into();
 
     let sample_rate_u32: u32 = sample_rate;
-    let samples_per_frame =
-        f64_to_usize((f64::from(sample_rate_u32) / f64::from(song_hz)).round().max(1.0));
+    let samples_per_frame = f64_to_usize(
+        (f64::from(sample_rate_u32) / f64::from(song_hz))
+            .round()
+            .max(1.0),
+    );
     let mut chip = Ym2149::with_clocks(song_seq.timing.master_clock_hz, sample_rate_u32);
 
     let song_frames: Arc<[YmFrame]> = song_seq.frames.as_slice().into();
@@ -825,7 +827,9 @@ fn run_mix(
         cpal::SampleFormat::F32 => device.build_output_stream(
             stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut s = state_cb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut s = state_cb
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if s.finished {
                     for sample in data.iter_mut() {
@@ -905,7 +909,7 @@ fn run_mix(
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len} {msg}",
         )?
-            .progress_chars("=>-"),
+        .progress_chars("=>-"),
     );
 
     pb.set_message(format!(
@@ -917,7 +921,9 @@ fn run_mix(
     loop {
         while let Ok(key) = key_rx.try_recv() {
             if matches!(key, Key::Char('q' | 'Q')) {
-                let mut s = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut s = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.finished = true;
                 finished_atomic.store(true, Ordering::Relaxed);
                 break;
@@ -925,7 +931,9 @@ fn run_mix(
 
             if matches!(key, Key::ArrowRight | Key::ArrowLeft) {
                 let step_frames = (song_hz as usize) * 5;
-                let mut s = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut s = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let current_idx = s.song_frame_idx;
                 let target_idx = match key {
                     Key::ArrowRight => current_idx
@@ -968,7 +976,9 @@ fn run_mix(
 
             if let Some(sfx_idx) = sfx_trigger_idx {
                 if let Some(frames) = sfx_frames_list.get(sfx_idx) {
-                    let mut s = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut s = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let target_ch = if s.active_sfx[preferred_chan_idx].is_none() {
                         preferred_chan_idx
                     } else if s.active_sfx[2].is_none() {

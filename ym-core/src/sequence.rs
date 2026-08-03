@@ -168,7 +168,7 @@ impl YmSequence {
                     "Sequence index {} out of range (max {})",
                     pattern_idx, header.num_unique
                 )
-                    .into());
+                .into());
             }
             let start_ptr = pattern_data_start + offsets[pattern_idx];
             if start_ptr >= bytes.len() {
@@ -263,9 +263,9 @@ impl YmSequence {
         reg_14[1] &= 0x0F; // R1 bits 4-7 unused
         reg_14[3] &= 0x0F; // R3 bits 4-7 unused
         reg_14[5] &= 0x0F; // R5 bits 4-7 unused
-        // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
-        // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
-        // chip — silence those channels to prevent false envelope-mode triggering.
+                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
+                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
+                           // chip — silence those channels to prevent false envelope-mode triggering.
         let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
         if reg_14[8] > 0x1F {
             reg_14[8] = 0;
@@ -496,8 +496,9 @@ impl YmSequence {
                 Ok(seq)
             }
             _ => Err(format!(
-                "Unsupported song file extension '.{extension}'. Expected .ysg, .ym, or .json")
-                .into()),
+                "Unsupported song file extension '.{extension}'. Expected .ysg, .ym, or .json"
+            )
+            .into()),
         }
     }
 }
@@ -769,7 +770,7 @@ impl SfxSequence {
                     line_num + 1,
                     parts.len()
                 )
-                    .into());
+                .into());
             }
 
             let t = parts[0].parse::<i32>()? != 0;
@@ -821,8 +822,9 @@ impl SfxSequence {
             if offset_ptr + 1 >= bank_data.len() {
                 break;
             }
-            let offset_val =
-                (u16::from(bank_data[offset_ptr]) | (u16::from(bank_data[offset_ptr + 1]) << 8)) as usize;
+            let offset_val = (u16::from(bank_data[offset_ptr])
+                | (u16::from(bank_data[offset_ptr + 1]) << 8))
+                as usize;
             let start_idx = 2 + i * 2 + offset_val;
             if start_idx >= bank_data.len() {
                 continue;
@@ -864,8 +866,9 @@ impl SfxSequence {
         if i < num_effects - 1 {
             let next_ptr = 3 + i * 2;
             if next_ptr + 1 < bank_data.len() {
-                let next_offset_val =
-                    (u16::from(bank_data[next_ptr]) | (u16::from(bank_data[next_ptr + 1]) << 8)) as usize;
+                let next_offset_val = (u16::from(bank_data[next_ptr])
+                    | (u16::from(bank_data[next_ptr + 1]) << 8))
+                    as usize;
                 let next_start_idx = 4 + i * 2 + next_offset_val;
                 if next_start_idx <= bank_data.len() {
                     if let Some(diff) = next_start_idx.checked_sub(start_idx) {

@@ -546,10 +546,7 @@ impl DeltaCompiler {
 
     /// Converts a high-level [`sequence::YmFrame`] into raw YM2149 14-byte register array.
     /// `None` fields inherit their value from `prev_registers`, matching `apply_to_chip` semantics.
-    fn extract_frame_registers(
-        frame: &sequence::YmFrame,
-        prev_registers: &[u8; 14],
-    ) -> [u8; 14] {
+    fn extract_frame_registers(frame: &sequence::YmFrame, prev_registers: &[u8; 14]) -> [u8; 14] {
         let mut regs = *prev_registers;
 
         // Tone A, B, C
