@@ -80,6 +80,14 @@ enum SongCommands {
         #[arg(long)]
         clock: Option<u32>,
 
+        /// Target chip clock in Hz that pitches are retuned for (default: 1789773,
+        /// the Atari 7800's YM-2149 clock). Real Apple II Mockingboard hardware
+        /// (and AppleWin) clocks the AY-3-8910 from the 6502 clock (~1020484 Hz);
+        /// pass --target-clock 1020484 when rendering for that platform, or notes
+        /// will play back roughly an octave flat.
+        #[arg(long)]
+        target_clock: Option<u32>,
+
         #[arg(short, long, default_value_t = 1)]
         step: usize,
 
@@ -277,6 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 hz,
                 clock,
+                target_clock,
                 step,
                 compression,
                 no_dedup,
@@ -287,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 hz,
                 clock,
+                target_clock,
                 step,
                 compression,
                 no_dedup,
@@ -318,11 +328,7 @@ fn run_song_dump(
     frames: usize,
     start: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
-    let ym_data = fs::read(input)?;
-    let (sequence, _) = with_spinner("Decoding...", || {
-        YmSequence::from_ym_data(name, &ym_data, None)
-    })?;
+    let sequence = with_spinner("Decoding...", || YmSequence::load_from_path(input, None))?;
 
     let end = (start + frames).min(sequence.frames.len());
     println!(
@@ -364,6 +370,7 @@ fn run_song_render(
     output: Option<PathBuf>,
     hz: Option<HzOption>,
     clock: Option<u32>,
+    target_clock: Option<u32>,
     step: usize,
     compression: CompressionArg,
     no_dedup: bool,
@@ -390,7 +397,7 @@ fn run_song_render(
         let bytes = fs::read(input)?;
         original_ym_size = Some(YmSequence::ym_decompressed_len(&bytes)?);
         with_spinner("Decoding YM chiptune...", || {
-            YmSequence::from_ym_data(name, &bytes, clock)
+            YmSequence::from_ym_data(name, &bytes, clock, target_clock)
         })?
     } else {
         let content = fs::read_to_string(input)?;
@@ -619,7 +626,7 @@ fn run_song_play(
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
         let ym_data = fs::read(input)?;
         let (mut sequence, _) = with_spinner("Decoding YM via YmSequence pipeline...", || {
-            YmSequence::from_ym_data(name, &ym_data, None)
+            YmSequence::from_ym_data(name, &ym_data, None, None)
         })?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = hz_override.into();
