@@ -323,6 +323,7 @@ impl YmSequence {
         name: &str,
         ym_data: &[u8],
         source_clock_override: Option<u32>,
+        target_clock_override: Option<u32>,
     ) -> Result<(Self, usize), Box<dyn std::error::Error>> {
         use ym2149_common::{ChiptunePlayer, MetadataFields};
         use ym2149_ym_replayer::decompress_if_needed;
@@ -332,7 +333,10 @@ impl YmSequence {
         let source_clock =
             source_clock_override.unwrap_or_else(|| Self::detect_ym_source_clock(&decompressed));
 
-        let target_clock = 1_789_773u32;
+        // Default: Atari 7800's YM-2149 clock. Override for platforms whose real
+        // hardware clocks the chip differently (e.g. Apple II Mockingboard, which
+        // runs off the 6502 clock, ~1_020_484 Hz) so pitches stay in tune.
+        let target_clock = target_clock_override.unwrap_or(1_789_773u32);
         let ratio = f64::from(target_clock) / f64::from(source_clock);
         let apply_scaling = (ratio - 1.0).abs() > 0.0001;
 
@@ -492,7 +496,7 @@ impl YmSequence {
             }
             "ym" => {
                 let bytes = std::fs::read(input)?;
-                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override)?;
+                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override, None)?;
                 Ok(seq)
             }
             _ => Err(format!(
