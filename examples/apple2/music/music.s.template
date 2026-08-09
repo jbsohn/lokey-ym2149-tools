@@ -1,0 +1,16 @@
+; ============================================================
+; music.s -- Per-song data module for ysg_player
+;
+; Copy this file for each song, fill in the paths, then:
+;   ca65 music.s -o music.o
+;   ld65 -C apple2.cfg player.o music.o -o song.bin
+;
+; Generated .ysi constants are scoped to the song name:
+;   songname::PLAYER_HZ, songname::YM_DELAY, etc.
+; ============================================================
+
+.segment "RODATA"
+
+.export music_data
+music_data:
+    .incbin "song.ysg"

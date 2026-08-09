@@ -17,9 +17,21 @@ A comprehensive developer toolchain for compiling, auditing, and auditioning sou
 
 ## Target Platforms & Contributing
 
-While the primary target is currently the **Atari 7800** console (1.789773 MHz clock / ca65 toolchain), the binary formats (`.ysg`, `.yfx`) and compiler tools are platform-agnostic, supporting any YM2149 or AY-3-8910 platform (such as ZX Spectrum, MSX, Amstrad CPC, Atari ST, Atari XL/XE expansion, Apple II Mockingboard, Intellivision, or Vectrex).
+The **Atari 7800** console (1.789773 MHz clock / ca65 toolchain) is the main, actively-developed target — it's what the tooling is built and tuned for day to day. That said, the binary formats (`.ysg`, `.yfx`) and compiler tools are designed to be platform-agnostic, supporting any YM2149 or AY-3-8910 platform (such as ZX Spectrum, MSX, Amstrad CPC, Atari ST, Atari XL/XE expansion, Apple II Mockingboard, Intellivision, or Vectrex).
 
 Pull requests and merge requests for additional target platform replayers, assembly drivers, and sample projects are graciously accepted!
+
+### Example Projects
+
+Each platform under [`examples/`](examples/) is a self-contained assembly sample driving the `.ysg`/`.yfx` streams produced by `lym`. They require a platform-specific assembler toolchain on `PATH`, in addition to the Rust toolchain:
+
+| Platform | Directory | Assembler Toolchain | Role |
+| --- | --- | --- | --- |
+| Atari 7800 | [`examples/7800`](examples/7800) | [`cc65`](https://cc65.github.io/) (`ca65`, `ld65`) | Main platform |
+| Apple II (Mockingboard) | [`examples/apple2`](examples/apple2) | [`cc65`](https://cc65.github.io/) (`ca65`, `ld65`) | Cross-platform proof of concept |
+| Atari ST | [`examples/st`](examples/st) | [`rmac`](https://github.com/reboot-projects/rmac) (68000 mode) | Cross-platform proof of concept |
+
+The Apple II and Atari ST samples exist to prove out the "platform-agnostic" claim above, not as fully supported targets in their own right — porting to them exercised the shared `ym-core` code on real hardware assumptions the 7800 alone never triggered, and turned up genuine bugs (like clock-scaling and format-detection issues) that were fixed upstream for every platform.
 
 ---
 

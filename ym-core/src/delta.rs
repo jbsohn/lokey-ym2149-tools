@@ -30,13 +30,11 @@ pub struct CompilerOptions {
 }
 
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 fn usize_to_u8(val: usize) -> u8 {
     val as u8
 }
 
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
 fn usize_to_u32(val: usize) -> u32 {
     val as u32
 }

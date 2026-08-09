@@ -1,77 +1,85 @@
 ; =========================================================
-; ysg_player.s -- YSG Music Player for Atari 7800
+; ysg_player.s -- YSG Music Player for Apple II Mockingboard
 ; ca65 / cc65 toolchain
 ; =========================================================
 ; Build (example):
 ;   ca65 ysg_player.s -o player.o
 ;   ca65 music.s -o music.o          ; see music.s.template
-;   ld65 -C 7800.cfg player.o music.o -o game.bin
+;   ld65 -C apple2.cfg player.o music.o -o song.bin
+;
+; Output is a raw binary loadable at $0803:
+;   BLOAD song.bin
+;   CALL 2051
 ; =========================================================
 
-.include "maria.inc"
-.include "ym2149.inc"
+.include "mockingboard.inc"
 .include "ysg.inc"
 
 .segment "CODE"
 
 PLAYER_ZP_BASE  = $80
-NTSC_HZ         = 60
+CPU_HZ          = 60            ; polling rate driven by the VIA Timer 1 tick
+KBD             = $C000
+KBDSTRB         = $C010
+DOS_WARM        = $3D0          ; DOS 3.3 warm-start (re-enter "]" prompt)
+APPLE2_CLK_HZ   = 1020484
+TICK_CYCLES     = (APPLE2_CLK_HZ / CPU_HZ) - 2
 
-; Music frame rate — game code can override with: ca65 -D PLAYER_HZ=60
 .ifndef PLAYER_HZ
 PLAYER_HZ       = 50
 .endif
 
-; Zero-page variable aliases derived from TPlayerState struct offsets
-music_ptr   = PLAYER_ZP_BASE + TPlayerState::music_ptr
-pat_frames  = PLAYER_ZP_BASE + TPlayerState::pat_frames
-seq_idx     = PLAYER_ZP_BASE + TPlayerState::seq_idx
-tmp_mask    = PLAYER_ZP_BASE + TPlayerState::tmp_mask
-pat_table   = PLAYER_ZP_BASE + TPlayerState::pat_table
-pat_base    = PLAYER_ZP_BASE + TPlayerState::pat_base
-seq_base    = PLAYER_ZP_BASE + TPlayerState::seq_base
-pat_size    = PLAYER_ZP_BASE + TPlayerState::pat_size
-seq_len     = PLAYER_ZP_BASE + TPlayerState::seq_len
-loop_pat    = PLAYER_ZP_BASE + TPlayerState::loop_pat
+music_ptr      = PLAYER_ZP_BASE + TPlayerState::music_ptr
+pat_frames     = PLAYER_ZP_BASE + TPlayerState::pat_frames
+seq_idx        = PLAYER_ZP_BASE + TPlayerState::seq_idx
+tmp_mask       = PLAYER_ZP_BASE + TPlayerState::tmp_mask
+pat_table      = PLAYER_ZP_BASE + TPlayerState::pat_table
+pat_base       = PLAYER_ZP_BASE + TPlayerState::pat_base
+seq_base       = PLAYER_ZP_BASE + TPlayerState::seq_base
+pat_size       = PLAYER_ZP_BASE + TPlayerState::pat_size
+seq_len        = PLAYER_ZP_BASE + TPlayerState::seq_len
+loop_pat       = PLAYER_ZP_BASE + TPlayerState::loop_pat
 last_pat_frames = PLAYER_ZP_BASE + TPlayerState::last_pat_frames
-features    = PLAYER_ZP_BASE + TPlayerState::features
-music_acc   = PLAYER_ZP_BASE + TPlayerState::music_acc
-music_delta = PLAYER_ZP_BASE + TPlayerState::music_delta
-v_frame     = PLAYER_ZP_BASE + TPlayerState::v_frame
-rle_count   = PLAYER_ZP_BASE + TPlayerState::rle_count
+features       = PLAYER_ZP_BASE + TPlayerState::features
+music_acc      = PLAYER_ZP_BASE + TPlayerState::music_acc
+music_delta    = PLAYER_ZP_BASE + TPlayerState::music_delta
+v_frame        = PLAYER_ZP_BASE + TPlayerState::v_frame
 
 .import music_data
 
 ; ----------------------------------------------------------
 
-reset:
-        sei
+start:
         cld
-        ldx #$ff
-        txs
 
-        ldx #$00
-        ldy #$00
-p_1:    dex
-        bne p_1
-        dey
-        bne p_1
+        lda #$FF
+        sta AY_DDRA             ; data bus (ORA) = outputs
+        sta AY_DDRB             ; control lines (ORB) = outputs
+        lda #AY_RESET_HOLD
+        sta AY_CTRL              ; pulse AY /RESET low
+        lda #AY_MODE_INACTIVE
+        sta AY_CTRL              ; release /RESET, go inactive
 
-        jsr init_music
+        lda #AY_ACR_T1_FREERUN
+        sta AY_ACR
+        lda #<TICK_CYCLES
+        sta AY_T1LL
+        sta AY_T1CL
+        lda #>TICK_CYCLES
+        sta AY_T1LH
+        sta AY_T1CH               ; loads counter from latch and starts it
 
         ldx #NUM_REGS-1
-cl_y:   stx AY_ADDR
-        lda #0
-        sta AY_DATA
+cl_y:   lda #0
+        jsr ay_write
         dex
         bpl cl_y
 
-main_loop:
-        jsr sync_vbi
-        jsr update_visuals
+        jsr init_music
 
-        ; Rate conversion: add delta to accumulator each display frame.
-        ; delta == 0 means music rate matches display rate — play unconditionally.
+main_loop:
+        jsr wait_tick
+
         lda music_delta
         ora music_delta+1
         beq play_now
@@ -88,43 +96,55 @@ main_loop:
 play_now:
         jsr play_frame
 skip_play:
-        jmp main_loop
 
+        lda KBD
+        bpl main_loop
+        bit KBDSTRB
+        cmp #$8D                ; RETURN (works reliably on all emulators)
+        bne main_loop
+
+        ldx #NUM_REGS-1
+silence:
+        lda #0
+        jsr ay_write
+        dex
+        bpl silence
+
+        jmp DOS_WARM             ; re-enter DOS/BASIC cleanly
+        
 ; ----------------------------------------------------------
-sync_vbi:
-vbi1:   bit MSTAT
-        bmi vbi1
-vbi2:   bit MSTAT
-        bpl vbi2
-        inc v_frame
-        bne vbi_done
-        inc v_frame+1
-vbi_done:
+; ay_write -- write one AY-3-8910 register via the VIA bus
+;   in: X = register number, A = value
+;   Drives BC1/BDIR through LATCH ADDRESS then WRITE DATA, each
+;   followed by INACTIVE, per the AY-3-8910 bus protocol.
+; ----------------------------------------------------------
+ay_write:
+        pha
+        txa
+        sta AY_BUS
+        lda #AY_MODE_LATCH
+        sta AY_CTRL
+        lda #AY_MODE_INACTIVE
+        sta AY_CTRL
+        pla
+        sta AY_BUS
+        lda #AY_MODE_WRITE
+        sta AY_CTRL
+        lda #AY_MODE_INACTIVE
+        sta AY_CTRL
         rts
 
 ; ----------------------------------------------------------
-update_visuals:
-        lda v_frame
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        and #$07
-        sta tmp_mask
-        lda v_frame+1
-        asl
-        asl
-        asl
-        and #$08
-        ora tmp_mask
-        and #$0F
-        asl
-        asl
-        asl
-        asl
-        ora #$08
-        sta BKGRND
+; wait_tick -- block until the VIA Timer 1 tick (CPU_HZ) fires.
+; Free-running T1 keeps ticking in the background regardless of how long
+; play_frame took, so this self-corrects instead of drifting the way a
+; fixed-cycle-count busy-wait would once per-frame work varies.
+; ----------------------------------------------------------
+wait_tick:
+        lda AY_IFR
+        and #$40
+        beq wait_tick
+        lda AY_T1CL              ; reading T1C-L clears the T1 IFR flag
         rts
 
 ; ----------------------------------------------------------
@@ -134,17 +154,14 @@ init_music:
         lda #0
         sta seq_idx
         sta pat_frames
-        sta rle_count
         sta music_acc
         sta music_acc+1
         sta v_frame
         sta v_frame+1
 
-        ; music_delta = (PLAYER_HZ * 65536) / NTSC_HZ, evaluated at assemble time.
-        ; When PLAYER_HZ == NTSC_HZ this is 0, the sentinel for "play every frame".
-        lda #<((PLAYER_HZ * 65536) / NTSC_HZ)
+        lda #<((PLAYER_HZ * 65536) / CPU_HZ)
         sta music_delta
-        lda #>((PLAYER_HZ * 65536) / NTSC_HZ)
+        lda #>((PLAYER_HZ * 65536) / CPU_HZ)
         sta music_delta+1
 
         lda music_data + TYsgHeader::pat_size
@@ -162,13 +179,11 @@ init_music:
         lda music_data + TYsgHeader::features
         sta features
 
-        ; seq_base = &music_data[sizeof(TYsgHeader)]
         lda #<(music_data + .sizeof(TYsgHeader))
         sta seq_base
         lda #>(music_data + .sizeof(TYsgHeader))
         sta seq_base+1
 
-        ; pat_table = seq_base + seq_len
         clc
         lda seq_base
         adc seq_len
@@ -177,7 +192,6 @@ init_music:
         adc #0
         sta pat_table+1
 
-        ; pat_base = pat_table + num_unique * 4  (4-byte offset entries)
         lda music_data + TYsgHeader::num_unique
         sta tmp_mask
         lda #0
@@ -185,7 +199,7 @@ init_music:
         asl tmp_mask
         rol tmp_mask+1
         asl tmp_mask
-        rol tmp_mask+1          ; tmp_mask (16-bit) = num_unique * 4
+        rol tmp_mask+1
         clc
         lda pat_table
         adc tmp_mask
@@ -197,49 +211,37 @@ init_music:
         rts
 
 ; ----------------------------------------------------------
-; play_frame -- advance one music frame, write YM2149 regs
+; play_frame -- advance one music frame, write AY regs
 ; ----------------------------------------------------------
 play_frame:
-        lda rle_count
-        beq not_rle_idle
-        dec rle_count
-        dec pat_frames
-        rts
-
-not_rle_idle:
         lda pat_frames
         bne do_play
 
-        ; Advance to next pattern in sequence
         lda seq_idx
         cmp seq_len
         bcc load_pattern
 
-        ; Sequence exhausted — loop or restart
         lda loop_pat
         cmp #$FF
         bne do_loop
-        jsr init_music          ; no loop point: restart from beginning
+        jsr init_music
         rts
 
 do_loop:
-        sta seq_idx             ; jump seq_idx to loop point
+        sta seq_idx
 
 load_pattern:
-        ; Read pattern index from sequence table
         ldy seq_idx
         lda (seq_base),y
         inc seq_idx
 
-        ; Compute pointer to 4-byte offset entry: tmp_mask = pat_table + idx*4
-        ; idx*4 can exceed 8 bits, so use 16-bit arithmetic throughout.
         sta tmp_mask
         lda #0
         sta tmp_mask+1
         asl tmp_mask
         rol tmp_mask+1
         asl tmp_mask
-        rol tmp_mask+1          ; tmp_mask (16-bit) = idx * 4
+        rol tmp_mask+1
         clc
         lda tmp_mask
         adc pat_table
@@ -248,7 +250,6 @@ load_pattern:
         adc pat_table+1
         sta tmp_mask+1
 
-        ; Read low 16 bits of the 32-bit offset (high 2 bytes unused on 7800)
         ldy #0
         lda (tmp_mask),y
         sta music_ptr
@@ -256,7 +257,6 @@ load_pattern:
         lda (tmp_mask),y
         sta music_ptr+1
 
-        ; Resolve to absolute ROM address: music_ptr += pat_base
         clc
         lda music_ptr
         adc pat_base
@@ -265,7 +265,6 @@ load_pattern:
         adc pat_base+1
         sta music_ptr+1
 
-        ; Use last_pat_frames for the final sequence entry, pat_size otherwise.
         lda last_pat_frames
         beq use_pat_size
         lda seq_idx
@@ -281,7 +280,6 @@ use_pat_size:
 do_play:
         dec pat_frames
 
-        ; Read 16-bit delta mask for this frame, advance pointer past it
         ldy #0
         lda (music_ptr),y
         sta tmp_mask
@@ -296,32 +294,32 @@ do_play:
         adc #0
         sta music_ptr+1
 
-        ; Check for RLE token: features bit 0 enables RLE, mask bit 15 (0x8000) is the flag.
         lda features
-        lsr                     ; bit 0 -> carry
-        bcc rle_done            ; RLE disabled in this file
-        bit tmp_mask+1          ; N flag <- bit 7 of tmp_mask+1 (the RLE flag)
-        bpl rle_done            ; bit 7 clear -> normal frame
-        ; RLE token: read count byte N, subtract from pat_frames (N additional idle frames)
+        lsr
+        bcc rle_done
+        bit tmp_mask+1
+        bpl rle_done
         ldy #0
         lda (music_ptr),y
         inc music_ptr
         bne rle_ptr_done
         inc music_ptr+1
 rle_ptr_done:
-        sta rle_count
+        sta tmp_mask
+        lda pat_frames
+        sec
+        sbc tmp_mask
+        sta pat_frames
         rts
 rle_done:
-        ; Write changed registers R0-R7 (low byte of mask)
         ldx #0
 reg_low:
         lda bit_table,x
         and tmp_mask
         beq next_low
-        stx AY_ADDR
         ldy #0
         lda (music_ptr),y
-        sta AY_DATA
+        jsr ay_write
         inc music_ptr
         bne next_low
         inc music_ptr+1
@@ -330,7 +328,6 @@ next_low:
         cpx #8
         bne reg_low
 
-        ; Write changed registers R8-R13 (high byte of mask)
 reg_high:
         txa
         and #$07
@@ -338,10 +335,9 @@ reg_high:
         lda bit_table,y
         and tmp_mask+1
         beq next_high
-        stx AY_ADDR
         ldy #0
         lda (music_ptr),y
-        sta AY_DATA
+        jsr ay_write
         inc music_ptr
         bne next_high
         inc music_ptr+1
@@ -354,12 +350,3 @@ next_high:
 
 bit_table:
         .byte $01, $02, $04, $08, $10, $20, $40, $80
-
-; ----------------------------------------------------------
-; Vectors
-; ----------------------------------------------------------
-.segment "VECTORS"
-        .byte $FF, $83
-        .word reset
-        .word reset
-        .word reset
