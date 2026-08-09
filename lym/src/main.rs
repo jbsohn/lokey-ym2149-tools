@@ -20,7 +20,6 @@ use ym_core::{
     about = "Lokey YM-2149 Command Line Toolchain",
     long_about = "A unified CLI tool for compiling, auditioning, and interactively mixing music songs and sound effects targeting the Yamaha YM-2149 Programmable Sound Generator."
 )]
-
 struct LymCli {
     #[command(subcommand)]
     command: MainCommands,
@@ -87,7 +86,7 @@ enum SongCommands {
 
         /// Target chip clock in Hz that pitches are retuned for (default: 1789773,
         /// the Atari 7800's YM-2149 clock). Pass 2000000 to keep an Atari ST source
-        /// at native pitch. Real Apple II Mockingboard hardware (and AppleWin)
+        /// at native pitch. Real Apple II Mockingboard hardware (and `AppleWin`)
         /// clocks the AY-3-8910 from the 6502 clock (~1020484 Hz); pass
         /// --target-clock 1020484 when rendering for that platform, or notes
         /// will play back roughly an octave flat.
@@ -926,7 +925,7 @@ fn run_mix(
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len} {msg}",
         )?
-        .progress_chars("=>-"),
+            .progress_chars("=>-"),
     );
 
     pb.set_message(format!(
