@@ -59,6 +59,11 @@ enum MainCommands {
         /// Source chip clock in Hz (default: 2000000 for ST)
         #[arg(long)]
         clock: Option<u32>,
+
+        /// Target chip clock in Hz to scale pitch for (default: 1789773 for
+        /// Atari 7800; pass 2000000 to keep an Atari ST source at native pitch)
+        #[arg(long)]
+        target_clock: Option<u32>,
     },
 }
 
@@ -81,9 +86,10 @@ enum SongCommands {
         clock: Option<u32>,
 
         /// Target chip clock in Hz that pitches are retuned for (default: 1789773,
-        /// the Atari 7800's YM-2149 clock). Real Apple II Mockingboard hardware
-        /// (and AppleWin) clocks the AY-3-8910 from the 6502 clock (~1020484 Hz);
-        /// pass --target-clock 1020484 when rendering for that platform, or notes
+        /// the Atari 7800's YM-2149 clock). Pass 2000000 to keep an Atari ST source
+        /// at native pitch. Real Apple II Mockingboard hardware (and AppleWin)
+        /// clocks the AY-3-8910 from the 6502 clock (~1020484 Hz); pass
+        /// --target-clock 1020484 when rendering for that platform, or notes
         /// will play back roughly an octave flat.
         #[arg(long)]
         target_clock: Option<u32>,
@@ -242,8 +248,9 @@ fn with_spinner<T>(message: &str, f: impl FnOnce() -> T) -> T {
 fn load_song(
     input: &Path,
     clock_override: Option<u32>,
+    target_clock_override: Option<u32>,
 ) -> Result<YmSequence, Box<dyn std::error::Error>> {
-    YmSequence::load_from_path(input, clock_override)
+    YmSequence::load_from_path(input, clock_override, target_clock_override)
 }
 
 fn load_sfx(input: &Path, bank_index: usize) -> Result<SfxSequence, Box<dyn std::error::Error>> {
@@ -319,7 +326,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             channel,
             hz,
             clock,
-        } => run_mix(&song, &sfx, channel, hz, clock),
+            target_clock,
+        } => run_mix(&song, &sfx, channel, hz, clock, target_clock),
     }
 }
 
@@ -328,7 +336,8 @@ fn run_song_dump(
     frames: usize,
     start: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sequence = with_spinner("Decoding...", || YmSequence::load_from_path(input, None))?;
+    let sequence =
+        with_spinner("Decoding...", || YmSequence::load_from_path(input, None, None))?;
 
     let end = (start + frames).min(sequence.frames.len());
     println!(
@@ -611,7 +620,7 @@ fn run_song_play(
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
     if extension == "json" || extension == "ysg" {
-        let mut sequence = load_song(input, None)?;
+        let mut sequence = load_song(input, None, None)?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = hz_override.into();
         }
@@ -736,13 +745,14 @@ fn run_mix(
     channel: ChannelArg,
     hz: Option<HzOption>,
     clock: Option<u32>,
+    target_clock: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{} Loading song {}...",
         style("LOADING SONG:").bold().cyan(),
         style(song.display()).cyan()
     );
-    let mut song_seq = load_song(song, clock)?;
+    let mut song_seq = load_song(song, clock, target_clock)?;
 
     println!(
         "{} Loading sound effect bank...",

@@ -1,4 +1,4 @@
-use crate::timing::{SystemHz, TimingConfig, ATARI_ST_CLOCK, ZX_SPECTRUM_CLOCK};
+use crate::timing::{SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK, ZX_SPECTRUM_CLOCK};
 use serde::{Deserialize, Serialize};
 
 /// High-level frame representation for YM-2149 sound sequence authoring.
@@ -316,6 +316,11 @@ impl YmSequence {
     /// Returns the sequence and the number of frames where digi-drum sample values
     /// were detected and silenced (YM6 only). Callers should warn the user when > 0.
     ///
+    /// `target_clock_override` selects the chip clock the output is scaled for
+    /// (default: `ATARI_7800_CLOCK`, 1.789773 MHz). Pass `ATARI_ST_CLOCK`
+    /// (2 MHz) to keep a genuine Atari ST source at its native pitch instead of
+    /// rescaling it for the 7800.
+    ///
     /// # Errors
     ///
     /// Returns an error if LHA decompression fails or the YM register stream format is invalid.
@@ -335,8 +340,9 @@ impl YmSequence {
 
         // Default: Atari 7800's YM-2149 clock. Override for platforms whose real
         // hardware clocks the chip differently (e.g. Apple II Mockingboard, which
-        // runs off the 6502 clock, ~1_020_484 Hz) so pitches stay in tune.
-        let target_clock = target_clock_override.unwrap_or(1_789_773u32);
+        // runs off the 6502 clock, ~1_020_484 Hz, or the Atari ST's 2 MHz clock)
+        // so pitches stay in tune.
+        let target_clock = target_clock_override.unwrap_or(ATARI_7800_CLOCK);
         let ratio = f64::from(target_clock) / f64::from(source_clock);
         let apply_scaling = (ratio - 1.0).abs() > 0.0001;
 
@@ -481,6 +487,7 @@ impl YmSequence {
     pub fn load_from_path(
         input: &std::path::Path,
         clock_override: Option<u32>,
+        target_clock_override: Option<u32>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
@@ -496,7 +503,7 @@ impl YmSequence {
             }
             "ym" => {
                 let bytes = std::fs::read(input)?;
-                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override, None)?;
+                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override, target_clock_override)?;
                 Ok(seq)
             }
             _ => Err(format!(

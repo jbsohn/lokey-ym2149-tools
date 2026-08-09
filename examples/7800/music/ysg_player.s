@@ -38,6 +38,7 @@ features    = PLAYER_ZP_BASE + TPlayerState::features
 music_acc   = PLAYER_ZP_BASE + TPlayerState::music_acc
 music_delta = PLAYER_ZP_BASE + TPlayerState::music_delta
 v_frame     = PLAYER_ZP_BASE + TPlayerState::v_frame
+rle_count   = PLAYER_ZP_BASE + TPlayerState::rle_count
 
 .import music_data
 
@@ -133,6 +134,7 @@ init_music:
         lda #0
         sta seq_idx
         sta pat_frames
+        sta rle_count
         sta music_acc
         sta music_acc+1
         sta v_frame
@@ -198,6 +200,13 @@ init_music:
 ; play_frame -- advance one music frame, write YM2149 regs
 ; ----------------------------------------------------------
 play_frame:
+        lda rle_count
+        beq not_rle_idle
+        dec rle_count
+        dec pat_frames
+        rts
+
+not_rle_idle:
         lda pat_frames
         bne do_play
 
@@ -300,11 +309,7 @@ do_play:
         bne rle_ptr_done
         inc music_ptr+1
 rle_ptr_done:
-        sta tmp_mask            ; borrow tmp_mask lo as scratch for N
-        lda pat_frames
-        sec
-        sbc tmp_mask
-        sta pat_frames
+        sta rle_count
         rts
 rle_done:
         ; Write changed registers R0-R7 (low byte of mask)

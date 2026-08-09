@@ -1,5 +1,6 @@
 # Atari 7800 Examples Top-Level Makefile
 # Delegates builds to subdirectories: music and mix
+# Requires cc65 (ca65, ld65 -- https://cc65.github.io/) on PATH.
 
 LYM_BIN := ../../target/release/lym
 
