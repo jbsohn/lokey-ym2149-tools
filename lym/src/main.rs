@@ -5,12 +5,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use ym2149::{Ym2149, Ym2149Backend};
 use ym_core::{
     spawn_key_listener, AudioPlayer, CompilerOptions, CompressionLevel, DeltaCompiler, HzOption,
-    SfxFrame, SfxSequence, SystemHz, YmChannel, YmFrame, YmSequence,
+    SfxFrame, SfxSequence, SystemHz, YmChannel, YmFrame, YmSequence, YmSongDetails,
 };
 
 #[derive(Parser, Debug)]
@@ -68,45 +68,51 @@ enum MainCommands {
 
 // --- SONG SUBCOMMANDS ---
 
+#[derive(Args, Debug)]
+struct SongRenderArgs {
+    #[arg(short, long)]
+    input: PathBuf,
+
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    #[arg(long, value_enum)]
+    hz: Option<HzOption>,
+
+    #[arg(long)]
+    clock: Option<u32>,
+
+    /// Target chip clock in Hz that pitches are retuned for (default: 1789773,
+    /// the Atari 7800's YM-2149 clock). Pass 2000000 to keep an Atari ST source
+    /// at native pitch. Real Apple II Mockingboard hardware (and `AppleWin`)
+    /// clocks the AY-3-8910 from the 6502 clock (~1020484 Hz); pass
+    /// --target-clock 1020484 when rendering for that platform, or notes
+    /// will play back roughly an octave flat.
+    #[arg(long)]
+    target_clock: Option<u32>,
+
+    #[arg(short, long, default_value_t = 1)]
+    step: usize,
+
+    #[arg(long, value_enum, default_value = "full")]
+    compression: CompressionArg,
+
+    #[arg(long)]
+    no_dedup: bool,
+
+    #[arg(long)]
+    no_rle: bool,
+
+    #[arg(long)]
+    max_bytes: Option<usize>,
+}
+
 #[derive(Subcommand, Debug)]
 enum SongCommands {
     /// Render a music song file into compiled YM-2149 binary stream (.ysg)
     Render {
-        #[arg(short, long)]
-        input: PathBuf,
-
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        #[arg(long, value_enum)]
-        hz: Option<HzOption>,
-
-        #[arg(long)]
-        clock: Option<u32>,
-
-        /// Target chip clock in Hz that pitches are retuned for (default: 1789773,
-        /// the Atari 7800's YM-2149 clock). Pass 2000000 to keep an Atari ST source
-        /// at native pitch. Real Apple II Mockingboard hardware (and `AppleWin`)
-        /// clocks the AY-3-8910 from the 6502 clock (~1020484 Hz); pass
-        /// --target-clock 1020484 when rendering for that platform, or notes
-        /// will play back roughly an octave flat.
-        #[arg(long)]
-        target_clock: Option<u32>,
-
-        #[arg(short, long, default_value_t = 1)]
-        step: usize,
-
-        #[arg(long, value_enum, default_value = "full")]
-        compression: CompressionArg,
-
-        #[arg(long)]
-        no_dedup: bool,
-
-        #[arg(long)]
-        no_rle: bool,
-
-        #[arg(long)]
-        max_bytes: Option<usize>,
+        #[command(flatten)]
+        args: SongRenderArgs,
     },
     /// Dump raw frame register data for diagnostic inspection
     Dump {
@@ -216,22 +222,17 @@ fn idx_to_ym_channel(idx: usize) -> YmChannel {
     }
 }
 
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn f64_to_u32(val: f64) -> u32 {
     val as u32
 }
 
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn f64_to_usize(val: f64) -> usize {
     val as usize
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn usize_to_f64(val: usize) -> f64 {
     val as f64
 }
-
-// --- HELPERS ---
 
 fn with_spinner<T>(message: &str, f: impl FnOnce() -> T) -> T {
     let pb = ProgressBar::new_spinner();
@@ -276,6 +277,253 @@ struct MixerState {
     active_sfx: [Option<PlayingSfx>; 3],
 }
 
+/// Everything the mix audio callback captures once per stream and reuses on every
+/// invocation, bundled so `fill_mix_buffer` doesn't need a separate argument for each one.
+struct MixCallbackContext<'a> {
+    song_frames: &'a [YmFrame],
+    finished: &'a AtomicBool,
+    current_frame: &'a AtomicUsize,
+    channels: usize,
+    samples_per_frame: usize,
+    total_song_frames: usize,
+    loop_start: Option<usize>,
+}
+
+/// Clocks the chip for one audio callback's worth of samples, advancing the song
+/// frame (and any active SFX on top of it) every `samples_per_frame` samples.
+fn fill_mix_buffer(data: &mut [f32], s: &mut MixerState, ctx: &MixCallbackContext<'_>) {
+    if s.finished {
+        for sample in data.iter_mut() {
+            *sample = 0.0;
+        }
+        ctx.finished.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    let mut i = 0;
+    while i < data.len() {
+        let sample_val = s.chip.get_sample();
+        s.chip.clock();
+
+        for c in 0..ctx.channels {
+            if i + c < data.len() {
+                data[i + c] = sample_val;
+            }
+        }
+        i += ctx.channels;
+
+        s.sample_in_frame += 1;
+        if s.sample_in_frame >= ctx.samples_per_frame {
+            s.sample_in_frame = 0;
+            s.song_frame_idx += 1;
+
+            if s.song_frame_idx >= ctx.total_song_frames {
+                if let Some(l_start) = ctx.loop_start {
+                    s.song_frame_idx = l_start;
+                } else {
+                    s.finished = true;
+                    ctx.finished.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+
+            let song_idx = s.song_frame_idx;
+            ctx.current_frame.store(song_idx, Ordering::Relaxed);
+
+            if let Some(sf) = ctx.song_frames.get(song_idx) {
+                sf.apply_to_chip(&mut s.chip, &mut s.mixer, &mut s.last_env_shape);
+            }
+
+            for ch in 0..3 {
+                if let Some(ref mut active) = s.active_sfx[ch] {
+                    if active.current_idx < active.frames.len() {
+                        let frame = &active.frames[active.current_idx];
+                        frame.apply_to_chip(&mut s.chip, &mut s.mixer, idx_to_ym_channel(ch));
+                        active.current_idx += 1;
+                    } else {
+                        s.active_sfx[ch] = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Prints the keyboard trigger for each of the first 10 loaded SFX.
+fn print_sfx_keybindings(sfx_list: &[SfxSequence]) {
+    for (idx, sfx_item) in sfx_list.iter().enumerate().take(10) {
+        let key_label = match idx {
+            0 => "1 or SPACEBAR".to_string(),
+            1..=8 => format!("{}", idx + 1),
+            _ => "0".to_string(),
+        };
+        println!(
+            "  [{}] Key {}: {} ({} frames)",
+            style(idx).dim(),
+            style(key_label).yellow().bold(),
+            style(&sfx_item.name).cyan(),
+            sfx_item.frames.len()
+        );
+    }
+}
+
+/// Rebuilds absolute chip register state and jumps song playback to `target_idx`.
+/// Song frames are sparse diffs, so seeking requires replaying every frame's
+/// register writes from the start (cheap: integer writes, no audio synthesis).
+fn seek_song(
+    state: &Mutex<MixerState>,
+    current_frame_atomic: &AtomicUsize,
+    song_frames: &[YmFrame],
+    target_idx: usize,
+    master_clock_hz: u32,
+    sample_rate: u32,
+) {
+    let mut scratch_chip = Ym2149::with_clocks(master_clock_hz, sample_rate);
+    let mut mixer = 0x3F;
+    let mut last_env_shape = None;
+    for f in &song_frames[..=target_idx] {
+        f.apply_to_chip(&mut scratch_chip, &mut mixer, &mut last_env_shape);
+    }
+
+    let mut s = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    s.chip = scratch_chip;
+    s.song_frame_idx = target_idx;
+    s.sample_in_frame = 0;
+    s.mixer = mixer;
+    s.last_env_shape = last_env_shape;
+    drop(s);
+    current_frame_atomic.store(target_idx, Ordering::Relaxed);
+}
+
+/// Maps a keyboard trigger key to its SFX bank slot (`SPACE`/`1`-`9`/`0` -> `0`-`9`).
+fn key_to_sfx_index(key: &Key) -> Option<usize> {
+    match key {
+        Key::Char(' ' | '1') => Some(0),
+        Key::Char('2') => Some(1),
+        Key::Char('3') => Some(2),
+        Key::Char('4') => Some(3),
+        Key::Char('5') => Some(4),
+        Key::Char('6') => Some(5),
+        Key::Char('7') => Some(6),
+        Key::Char('8') => Some(7),
+        Key::Char('9') => Some(8),
+        Key::Char('0') => Some(9),
+        _ => None,
+    }
+}
+
+/// Starts SFX bank slot `sfx_idx` playing on the first available channel, preferring
+/// `preferred_chan_idx` and falling back to C, B, then A if it's already busy.
+fn trigger_sfx(
+    state: &Mutex<MixerState>,
+    sfx_frames_list: &[Arc<[SfxFrame]>],
+    sfx_idx: usize,
+    preferred_chan_idx: usize,
+) {
+    let Some(frames) = sfx_frames_list.get(sfx_idx) else {
+        return;
+    };
+    let mut s = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let target_ch = if s.active_sfx[preferred_chan_idx].is_none() {
+        preferred_chan_idx
+    } else if s.active_sfx[2].is_none() {
+        2
+    } else if s.active_sfx[1].is_none() {
+        1
+    } else if s.active_sfx[0].is_none() {
+        0
+    } else {
+        preferred_chan_idx
+    };
+
+    s.active_sfx[target_ch] = Some(PlayingSfx {
+        frames: Arc::clone(frames),
+        current_idx: 0,
+    });
+}
+
+/// Everything the interactive mix loop needs to handle keyboard input and report
+/// progress, bundled so `run_mix_loop` doesn't need a separate argument for each one.
+struct MixLoopContext<'a> {
+    state: &'a Mutex<MixerState>,
+    current_frame_atomic: &'a AtomicUsize,
+    finished_atomic: &'a AtomicBool,
+    song_frames: &'a [YmFrame],
+    sfx_frames_list: &'a [Arc<[SfxFrame]>],
+    song_hz: u32,
+    total_song_frames: usize,
+    master_clock_hz: u32,
+    sample_rate: u32,
+    preferred_chan_idx: usize,
+}
+
+/// Drives interactive mix playback: polls keyboard input for quit/seek/SFX-trigger
+/// commands and updates the progress bar, until playback finishes or the user quits.
+fn run_mix_loop(key_rx: &mpsc::Receiver<Key>, pb: &ProgressBar, ctx: &MixLoopContext<'_>) {
+    loop {
+        while let Ok(key) = key_rx.try_recv() {
+            if matches!(key, Key::Char('q' | 'Q')) {
+                let mut s = ctx
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                s.finished = true;
+                ctx.finished_atomic.store(true, Ordering::Relaxed);
+                break;
+            }
+
+            if matches!(key, Key::ArrowRight | Key::ArrowLeft) {
+                let step_frames = (ctx.song_hz as usize) * 5;
+                let current_idx = {
+                    let s = ctx
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    s.song_frame_idx
+                };
+                let target_idx = match key {
+                    Key::ArrowRight => current_idx
+                        .saturating_add(step_frames)
+                        .min(ctx.total_song_frames.saturating_sub(1)),
+                    Key::ArrowLeft => current_idx.saturating_sub(step_frames),
+                    _ => current_idx,
+                };
+
+                seek_song(
+                    ctx.state,
+                    ctx.current_frame_atomic,
+                    ctx.song_frames,
+                    target_idx,
+                    ctx.master_clock_hz,
+                    ctx.sample_rate,
+                );
+            }
+
+            if let Some(sfx_idx) = key_to_sfx_index(&key) {
+                trigger_sfx(
+                    ctx.state,
+                    ctx.sfx_frames_list,
+                    sfx_idx,
+                    ctx.preferred_chan_idx,
+                );
+            }
+        }
+
+        let current = ctx.current_frame_atomic.load(Ordering::Relaxed);
+        pb.set_position(current as u64);
+
+        if ctx.finished_atomic.load(Ordering::Relaxed) {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = LymCli::parse();
 
@@ -286,29 +534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frames,
                 start,
             } => run_song_dump(&input, frames, start),
-            SongCommands::Render {
-                input,
-                output,
-                hz,
-                clock,
-                target_clock,
-                step,
-                compression,
-                no_dedup,
-                no_rle,
-                max_bytes,
-            } => run_song_render(
-                &input,
-                output,
-                hz,
-                clock,
-                target_clock,
-                step,
-                compression,
-                no_dedup,
-                no_rle,
-                max_bytes,
-            ),
+            SongCommands::Render { args } => run_song_render(args),
             SongCommands::Play {
                 input,
                 hz,
@@ -372,61 +598,104 @@ fn run_song_dump(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn run_song_render(
-    input: &Path,
-    output: Option<PathBuf>,
-    hz: Option<HzOption>,
-    clock: Option<u32>,
-    target_clock: Option<u32>,
-    step: usize,
-    compression: CompressionArg,
-    no_dedup: bool,
-    no_rle: bool,
-    max_bytes: Option<usize>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let SongRenderArgs {
+        input,
+        output,
+        hz,
+        clock,
+        target_clock,
+        step,
+        compression,
+        no_dedup,
+        no_rle,
+        max_bytes,
+    } = args;
+    let input = input.as_path();
     let output_path = output.unwrap_or_else(|| {
         let mut path = input.to_path_buf();
         path.set_extension("ysg");
         path
     });
-
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
-
+    let (mut sequence, digidrum_frames, original_ym_size) =
+        decode_song_input(input, extension, name, clock, target_clock)?;
+    let step = step.max(1);
     println!(
         "{} {}...",
         style("LOADING:").bold().cyan(),
         style(input.display()).cyan()
     );
-
-    let mut original_ym_size: Option<usize> = None;
-    let (mut sequence, digidrum_frames) = if extension.eq_ignore_ascii_case("ym") {
-        let bytes = fs::read(input)?;
-        original_ym_size = Some(YmSequence::ym_decompressed_len(&bytes)?);
-        with_spinner("Decoding YM chiptune...", || {
-            YmSequence::from_ym_data(name, &bytes, clock, target_clock)
-        })?
-    } else {
-        let content = fs::read_to_string(input)?;
-        (serde_json::from_str(&content)?, 0)
+    sequence.frames = decimate_frames(&sequence.frames, step);
+    apply_frame_rate(&mut sequence, hz, step);
+    let compiler = DeltaCompiler::new();
+    let compression_level: CompressionLevel = compression.into();
+    let compiler_options = CompilerOptions {
+        dedup: !no_dedup,
+        rle: !no_rle,
+        ..CompilerOptions::default()
     };
+    let mut compiled_song = with_spinner("Compiling song...", || {
+        compiler.compile_song(&sequence, compression_level, &compiler_options)
+    })?;
+    if let Some(limit) = max_bytes {
+        compiled_song = shrink_to_max_bytes(
+            &mut sequence,
+            &compiler,
+            compression_level,
+            &compiler_options,
+            compiled_song,
+            limit,
+        )?;
+    }
 
-    let step = step.max(1);
-    let limit = sequence.frames.len();
+    fs::write(&output_path, &compiled_song.bytes)?;
+    write_ysi_include(input, name, &output_path, &sequence, &compiled_song)?;
+
+    let final_hz = sequence.timing.frame_rate.hz_value();
+    println!(
+        "{} {} frames -> {} ({} bytes, pattern size {}, {} Hz)",
+        style("RENDER SUCCESS:").bold().green(),
+        style(sequence.frames.len()).cyan(),
+        style(output_path.display()).cyan(),
+        style(compiled_song.bytes.len()).cyan(),
+        style(compiled_song.pattern_size).cyan(),
+        style(final_hz).cyan()
+    );
+
+    if digidrum_frames > 0 {
+        println!(
+            "{} {} frames contain YM6 digi-drum data — drums dropped, pitched content preserved",
+            style("WARNING:").bold().yellow(),
+            style(digidrum_frames).yellow(),
+        );
+    }
+    if let Some(original_size) = original_ym_size {
+        print_size_comparison(original_size, compiled_song.bytes.len());
+    }
+    Ok(())
+}
+
+/// Decimates `frames` by taking one output frame per `step`-sized window. For each
+/// of the three channels independently, the loudest frame in the window is picked
+/// and its tone/volume/enable state copied into the output frame, so that brief
+/// transients louder than their neighbors survive decimation instead of being
+/// skipped outright.
+fn decimate_frames(frames: &[YmFrame], step: usize) -> Vec<YmFrame> {
+    let limit = frames.len();
     let mut decimated_frames = Vec::new();
     let mut i = 0;
     while i < limit {
         let window_end = (i + step).min(limit);
         let mut best_idx_a = i;
-        let mut best_vol_a = sequence.frames[i].volume_a.unwrap_or(0);
+        let mut best_vol_a = frames[i].volume_a.unwrap_or(0);
         let mut best_idx_b = i;
-        let mut best_vol_b = sequence.frames[i].volume_b.unwrap_or(0);
+        let mut best_vol_b = frames[i].volume_b.unwrap_or(0);
         let mut best_idx_c = i;
-        let mut best_vol_c = sequence.frames[i].volume_c.unwrap_or(0);
+        let mut best_vol_c = frames[i].volume_c.unwrap_or(0);
 
-        for idx in i..window_end {
-            let f = &sequence.frames[idx];
+        for (idx, f) in frames.iter().enumerate().take(window_end).skip(i) {
             let v_a = f.volume_a.unwrap_or(0);
             if v_a > best_vol_a {
                 best_vol_a = v_a;
@@ -452,90 +721,45 @@ fn run_song_render(
             best_idx_c
         };
 
-        let mut final_frame = sequence.frames[i].clone();
-        final_frame.volume_a = sequence.frames[best_idx_a].volume_a;
-        final_frame.tone_a = sequence.frames[best_idx_a].tone_a;
-        final_frame.tone_enable_a = sequence.frames[best_idx_a].tone_enable_a;
-        final_frame.noise_enable_a = sequence.frames[best_idx_a].noise_enable_a;
+        let mut final_frame = frames[i].clone();
+        final_frame.volume_a = frames[best_idx_a].volume_a;
+        final_frame.tone_a = frames[best_idx_a].tone_a;
+        final_frame.tone_enable_a = frames[best_idx_a].tone_enable_a;
+        final_frame.noise_enable_a = frames[best_idx_a].noise_enable_a;
 
-        final_frame.volume_b = sequence.frames[best_idx_b].volume_b;
-        final_frame.tone_b = sequence.frames[best_idx_b].tone_b;
-        final_frame.tone_enable_b = sequence.frames[best_idx_b].tone_enable_b;
-        final_frame.noise_enable_b = sequence.frames[best_idx_b].noise_enable_b;
+        final_frame.volume_b = frames[best_idx_b].volume_b;
+        final_frame.tone_b = frames[best_idx_b].tone_b;
+        final_frame.tone_enable_b = frames[best_idx_b].tone_enable_b;
+        final_frame.noise_enable_b = frames[best_idx_b].noise_enable_b;
 
-        final_frame.volume_c = sequence.frames[best_idx_c].volume_c;
-        final_frame.tone_c = sequence.frames[best_idx_c].tone_c;
-        final_frame.tone_enable_c = sequence.frames[best_idx_c].tone_enable_c;
-        final_frame.noise_enable_c = sequence.frames[best_idx_c].noise_enable_c;
+        final_frame.volume_c = frames[best_idx_c].volume_c;
+        final_frame.tone_c = frames[best_idx_c].tone_c;
+        final_frame.tone_enable_c = frames[best_idx_c].tone_enable_c;
+        final_frame.noise_enable_c = frames[best_idx_c].noise_enable_c;
 
-        final_frame.noise_period = sequence.frames[dominant_idx].noise_period;
-        final_frame.envelope_period = sequence.frames[dominant_idx].envelope_period;
-        final_frame.envelope_shape = sequence.frames[dominant_idx].envelope_shape;
+        final_frame.noise_period = frames[dominant_idx].noise_period;
+        final_frame.envelope_period = frames[dominant_idx].envelope_period;
+        final_frame.envelope_shape = frames[dominant_idx].envelope_shape;
 
         decimated_frames.push(final_frame);
         i += step;
     }
-    sequence.frames = decimated_frames;
+    decimated_frames
+}
 
-    if let Some(hz_override) = hz {
-        sequence.timing.frame_rate = hz_override.into();
-    } else if step > 1 {
-        let current_hz = sequence.timing.frame_rate.hz_value();
-        let decimated_hz = f64_to_u32(
-            (f64::from(current_hz) / usize_to_f64(step))
-                .round()
-                .max(1.0),
-        );
-        sequence.timing.frame_rate = SystemHz::Custom(decimated_hz);
-    }
-
-    let compiler = DeltaCompiler::new();
-    let compression_level: CompressionLevel = compression.into();
-    let compiler_options = CompilerOptions {
-        dedup: !no_dedup,
-        rle: !no_rle,
-        ..CompilerOptions::default()
-    };
-
-    let mut compiled_song = with_spinner("Compiling song...", || {
-        compiler.compile_song(&sequence, compression_level, &compiler_options)
-    })?;
-
-    if let Some(limit) = max_bytes {
-        if compiled_song.bytes.len() > limit {
-            let original_frames = sequence.frames.len();
-            loop {
-                let pattern_size = compiled_song.pattern_size;
-                let current_patterns = sequence.frames.len() / pattern_size;
-                if current_patterns == 0 {
-                    return Err("Cannot fit even one pattern within --max-bytes limit".into());
-                }
-                sequence
-                    .frames
-                    .truncate((current_patterns - 1) * pattern_size);
-                compiled_song =
-                    compiler.compile_song(&sequence, compression_level, &compiler_options)?;
-                if compiled_song.bytes.len() <= limit {
-                    break;
-                }
-            }
-            let dropped = original_frames - sequence.frames.len();
-            println!(
-                "{} truncated {} frames to fit within {} bytes",
-                style("WARNING:").bold().yellow(),
-                style(dropped).yellow(),
-                style(limit).yellow(),
-            );
-        }
-    }
-
-    fs::write(&output_path, &compiled_song.bytes)?;
-
+/// Writes the `.ysi` ca65 include sidecar (frame/pattern counts, timing constants)
+/// for a compiled `.ysg` song alongside `output_path`.
+fn write_ysi_include(
+    input: &Path,
+    name: &str,
+    output_path: &Path,
+    sequence: &YmSequence,
+    compiled_song: &YmSongDetails,
+) -> Result<(), Box<dyn std::error::Error>> {
     let final_hz = sequence.timing.frame_rate.hz_value();
     let (delay_y, delay_x) = ym_core::calculate_delay(final_hz);
     let num_patterns = compiled_song.bytes.get(1).copied().unwrap_or(0);
     let seq_len = compiled_song.bytes.get(2).copied().unwrap_or(0);
-
     let ysi_path = output_path.with_extension("ysi");
     let scope_name: String = name
         .chars()
@@ -570,45 +794,106 @@ fn run_song_render(
         num_patterns,
         seq_len,
     );
-    fs::write(&ysi_path, ysi_contents)?;
-
-    println!(
-        "{} {} frames -> {} ({} bytes, pattern size {}, {} Hz)",
-        style("RENDER SUCCESS:").bold().green(),
-        style(sequence.frames.len()).cyan(),
-        style(output_path.display()).cyan(),
-        style(compiled_song.bytes.len()).cyan(),
-        style(compiled_song.pattern_size).cyan(),
-        style(final_hz).cyan()
-    );
-
-    if digidrum_frames > 0 {
-        println!(
-            "{} {} frames contain YM6 digi-drum data — drums dropped, pitched content preserved",
-            style("WARNING:").bold().yellow(),
-            style(digidrum_frames).yellow(),
-        );
-    }
-
-    if let Some(original_size) = original_ym_size {
-        let new_size = compiled_song.bytes.len();
-        let orig_f64 = usize_to_f64(original_size);
-        let new_f64 = usize_to_f64(new_size);
-        let pct_change = if original_size > 0 {
-            100.0 * (orig_f64 - new_f64) / orig_f64
-        } else {
-            0.0
-        };
-        println!(
-            "{} {} bytes (uncompressed .ym) -> {} bytes (.ysg) ({:.1}% change)",
-            style("SIZE:").bold(),
-            style(original_size).cyan(),
-            style(new_size).cyan(),
-            pct_change
-        );
-    }
-
+    fs::write(ysi_path, ysi_contents)?;
     Ok(())
+}
+
+/// Decodes a song source (`.ym` chiptune or `.json` sequence) into a `YmSequence`.
+/// Returns the sequence, the number of YM6 digi-drum frames silenced, and (for `.ym`
+/// input) the original decompressed byte size for later size-comparison reporting.
+fn decode_song_input(
+    input: &Path,
+    extension: &str,
+    name: &str,
+    clock: Option<u32>,
+    target_clock: Option<u32>,
+) -> Result<(YmSequence, usize, Option<usize>), Box<dyn std::error::Error>> {
+    if extension.eq_ignore_ascii_case("ym") {
+        let bytes = fs::read(input)?;
+        let original_ym_size = Some(YmSequence::ym_decompressed_len(&bytes)?);
+        let (sequence, digidrum_frames) = with_spinner("Decoding YM chiptune...", || {
+            YmSequence::from_ym_data(name, &bytes, clock, target_clock)
+        })?;
+        Ok((sequence, digidrum_frames, original_ym_size))
+    } else {
+        let content = fs::read_to_string(input)?;
+        let sequence = serde_json::from_str(&content)?;
+        Ok((sequence, 0, None))
+    }
+}
+
+/// Applies an explicit `--hz` override, or (when frame-decimating via `--step`)
+/// rescales the frame rate down to match the reduced frame count.
+fn apply_frame_rate(sequence: &mut YmSequence, hz: Option<HzOption>, step: usize) {
+    if let Some(hz_override) = hz {
+        sequence.timing.frame_rate = hz_override.into();
+    } else if step > 1 {
+        let current_hz = sequence.timing.frame_rate.hz_value();
+        let decimated_hz = f64_to_u32(
+            (f64::from(current_hz) / usize_to_f64(step))
+                .round()
+                .max(1.0),
+        );
+        sequence.timing.frame_rate = SystemHz::Custom(decimated_hz);
+    }
+}
+
+/// Repeatedly drops the last pattern and recompiles until the song fits within
+/// `limit` bytes, warning about how many frames were truncated in the process.
+fn shrink_to_max_bytes(
+    sequence: &mut YmSequence,
+    compiler: &DeltaCompiler,
+    compression_level: CompressionLevel,
+    compiler_options: &CompilerOptions,
+    mut compiled_song: YmSongDetails,
+    limit: usize,
+) -> Result<YmSongDetails, Box<dyn std::error::Error>> {
+    if compiled_song.bytes.len() <= limit {
+        return Ok(compiled_song);
+    }
+
+    let original_frames = sequence.frames.len();
+    loop {
+        let pattern_size = compiled_song.pattern_size;
+        let current_patterns = sequence.frames.len() / pattern_size;
+        if current_patterns == 0 {
+            return Err("Cannot fit even one pattern within --max-bytes limit".into());
+        }
+        sequence
+            .frames
+            .truncate((current_patterns - 1) * pattern_size);
+        compiled_song = compiler.compile_song(sequence, compression_level, compiler_options)?;
+        if compiled_song.bytes.len() <= limit {
+            break;
+        }
+    }
+
+    let dropped = original_frames - sequence.frames.len();
+    println!(
+        "{} truncated {} frames to fit within {} bytes",
+        style("WARNING:").bold().yellow(),
+        style(dropped).yellow(),
+        style(limit).yellow(),
+    );
+    Ok(compiled_song)
+}
+
+/// Prints the size delta between the original `.ym` chiptune and the compiled `.ysg`.
+fn print_size_comparison(original_size: usize, new_size: usize) {
+    let orig_f64 = usize_to_f64(original_size);
+    let new_f64 = usize_to_f64(new_size);
+    let pct_change = if original_size > 0 {
+        100.0 * (orig_f64 - new_f64) / orig_f64
+    } else {
+        0.0
+    };
+    println!(
+        "{} {} bytes (uncompressed .ym) -> {} bytes (.ysg) ({:.1}% change)",
+        style("SIZE:").bold(),
+        style(original_size).cyan(),
+        style(new_size).cyan(),
+        pct_change
+    );
 }
 
 fn run_song_play(
@@ -764,20 +1049,7 @@ fn run_mix(
         style(sfx_list.len()).cyan()
     );
 
-    for (idx, sfx_item) in sfx_list.iter().enumerate().take(10) {
-        let key_label = match idx {
-            0 => "1 or SPACEBAR".to_string(),
-            1..=8 => format!("{}", idx + 1),
-            _ => "0".to_string(),
-        };
-        println!(
-            "  [{}] Key {}: {} ({} frames)",
-            style(idx).dim(),
-            style(key_label).yellow().bold(),
-            style(&sfx_item.name).cyan(),
-            sfx_item.frames.len()
-        );
-    }
+    print_sfx_keybindings(&sfx_list);
 
     if let Some(hz_override) = hz {
         song_seq.timing.frame_rate = hz_override.into();
@@ -846,71 +1118,16 @@ fn run_mix(
                 let mut s = state_cb
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-                if s.finished {
-                    for sample in data.iter_mut() {
-                        *sample = 0.0;
-                    }
-                    finished_cb.store(true, Ordering::Relaxed);
-                    return;
-                }
-
-                let mut i = 0;
-                while i < data.len() {
-                    let sample_val = s.chip.get_sample();
-                    s.chip.clock();
-
-                    for c in 0..channels {
-                        if i + c < data.len() {
-                            data[i + c] = sample_val;
-                        }
-                    }
-                    i += channels;
-
-                    s.sample_in_frame += 1;
-                    if s.sample_in_frame >= samples_per_frame {
-                        s.sample_in_frame = 0;
-                        s.song_frame_idx += 1;
-
-                        if s.song_frame_idx >= total_song_frames {
-                            if let Some(l_start) = loop_start {
-                                s.song_frame_idx = l_start;
-                            } else {
-                                s.finished = true;
-                                finished_cb.store(true, Ordering::Relaxed);
-                                return;
-                            }
-                        }
-
-                        let song_idx = s.song_frame_idx;
-                        current_frame_cb.store(song_idx, Ordering::Relaxed);
-
-                        let s_ref = &mut *s;
-                        if let Some(sf) = song_frames_cb.get(song_idx) {
-                            sf.apply_to_chip(
-                                &mut s_ref.chip,
-                                &mut s_ref.mixer,
-                                &mut s_ref.last_env_shape,
-                            );
-                        }
-
-                        for ch in 0..3 {
-                            if let Some(ref mut active) = s_ref.active_sfx[ch] {
-                                if active.current_idx < active.frames.len() {
-                                    let frame = &active.frames[active.current_idx];
-                                    frame.apply_to_chip(
-                                        &mut s_ref.chip,
-                                        &mut s_ref.mixer,
-                                        idx_to_ym_channel(ch),
-                                    );
-                                    active.current_idx += 1;
-                                } else {
-                                    s_ref.active_sfx[ch] = None;
-                                }
-                            }
-                        }
-                    }
-                }
+                let ctx = MixCallbackContext {
+                    song_frames: &song_frames_cb,
+                    finished: &finished_cb,
+                    current_frame: &current_frame_cb,
+                    channels,
+                    samples_per_frame,
+                    total_song_frames,
+                    loop_start,
+                };
+                fill_mix_buffer(data, &mut s, &ctx);
             },
             err_fn,
             None,
@@ -934,96 +1151,19 @@ fn run_mix(
 
     let key_rx = spawn_key_listener();
 
-    loop {
-        while let Ok(key) = key_rx.try_recv() {
-            if matches!(key, Key::Char('q' | 'Q')) {
-                let mut s = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                s.finished = true;
-                finished_atomic.store(true, Ordering::Relaxed);
-                break;
-            }
-
-            if matches!(key, Key::ArrowRight | Key::ArrowLeft) {
-                let step_frames = (song_hz as usize) * 5;
-                let mut s = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let current_idx = s.song_frame_idx;
-                let target_idx = match key {
-                    Key::ArrowRight => current_idx
-                        .saturating_add(step_frames)
-                        .min(total_song_frames.saturating_sub(1)),
-                    Key::ArrowLeft => current_idx.saturating_sub(step_frames),
-                    _ => current_idx,
-                };
-
-                let mut scratch_chip =
-                    Ym2149::with_clocks(song_seq.timing.master_clock_hz, sample_rate_u32);
-                let mut mixer = 0x3F;
-                let mut last_env_shape = None;
-                for f in &song_frames[..=target_idx] {
-                    f.apply_to_chip(&mut scratch_chip, &mut mixer, &mut last_env_shape);
-                }
-
-                s.chip = scratch_chip;
-                s.song_frame_idx = target_idx;
-                s.sample_in_frame = 0;
-                s.mixer = mixer;
-                s.last_env_shape = last_env_shape;
-                drop(s);
-                current_frame_atomic.store(target_idx, Ordering::Relaxed);
-            }
-
-            let sfx_trigger_idx: Option<usize> = match key {
-                Key::Char(' ' | '1') => Some(0),
-                Key::Char('2') => Some(1),
-                Key::Char('3') => Some(2),
-                Key::Char('4') => Some(3),
-                Key::Char('5') => Some(4),
-                Key::Char('6') => Some(5),
-                Key::Char('7') => Some(6),
-                Key::Char('8') => Some(7),
-                Key::Char('9') => Some(8),
-                Key::Char('0') => Some(9),
-                _ => None,
-            };
-
-            if let Some(sfx_idx) = sfx_trigger_idx {
-                if let Some(frames) = sfx_frames_list.get(sfx_idx) {
-                    let mut s = state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let target_ch = if s.active_sfx[preferred_chan_idx].is_none() {
-                        preferred_chan_idx
-                    } else if s.active_sfx[2].is_none() {
-                        2
-                    } else if s.active_sfx[1].is_none() {
-                        1
-                    } else if s.active_sfx[0].is_none() {
-                        0
-                    } else {
-                        preferred_chan_idx
-                    };
-
-                    s.active_sfx[target_ch] = Some(PlayingSfx {
-                        frames: Arc::clone(frames),
-                        current_idx: 0,
-                    });
-                }
-            }
-        }
-
-        let current = current_frame_atomic.load(Ordering::Relaxed);
-        pb.set_position(current as u64);
-
-        if finished_atomic.load(Ordering::Relaxed) {
-            break;
-        }
-
-        std::thread::sleep(Duration::from_millis(15));
-    }
+    let loop_ctx = MixLoopContext {
+        state: &state,
+        current_frame_atomic: &current_frame_atomic,
+        finished_atomic: &finished_atomic,
+        song_frames: &song_frames,
+        sfx_frames_list: &sfx_frames_list,
+        song_hz,
+        total_song_frames,
+        master_clock_hz: song_seq.timing.master_clock_hz,
+        sample_rate: sample_rate_u32,
+        preferred_chan_idx,
+    };
+    run_mix_loop(&key_rx, &pb, &loop_ctx);
 
     pb.finish_with_message("Playback finished.");
     let _ = std::process::Command::new("stty").arg("sane").status();

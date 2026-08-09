@@ -32,8 +32,8 @@ fn frame_progress_bar(total_frames: u64) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len}{msg}",
         )
-        .unwrap()
-        .progress_chars("=>-"),
+            .unwrap()
+            .progress_chars("=>-"),
     );
     pb
 }
@@ -85,6 +85,16 @@ struct AudioSink<'a> {
     stream_config: cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     channels: usize,
+}
+
+struct AudioFillContext<'a, F, Apply> {
+    frames: &'a [F],
+    finished: &'a AtomicBool,
+    current_frame: &'a AtomicUsize,
+    channels: usize,
+    samples_per_frame: usize,
+    loop_start: Option<usize>,
+    apply: &'a Apply,
 }
 
 /// Helper container for opening and managing cpal audio output settings.
@@ -166,18 +176,11 @@ impl AudioPlayer {
             current_frame.store(target, Ordering::Relaxed);
         })
     }
-
-    #[allow(clippy::too_many_arguments)]
+    
     fn fill_audio_buffer<F, Apply>(
         data: &mut [f32],
         s: &mut PlaybackState,
-        frames: &[F],
-        finished_atomic: &AtomicBool,
-        current_frame_atomic: &AtomicUsize,
-        channels: usize,
-        samples_per_frame: usize,
-        loop_start: Option<usize>,
-        apply: &Apply,
+        ctx: &AudioFillContext<'_, F, Apply>,
     ) where
         F: Send + Sync + 'static,
         Apply: Fn(&F, &mut Ym2149, &mut u8, &mut Option<u8>),
@@ -186,46 +189,46 @@ impl AudioPlayer {
             for sample in data.iter_mut() {
                 *sample = 0.0;
             }
-            finished_atomic.store(true, Ordering::Relaxed);
+            ctx.finished.store(true, Ordering::Relaxed);
             return;
         }
 
-        let total_frames = frames.len();
+        let total_frames = ctx.frames.len();
         let mut i = 0;
         while i < data.len() {
             let sample_val = s.chip.get_sample();
             s.chip.clock();
 
-            for c in 0..channels {
+            for c in 0..ctx.channels {
                 if i + c < data.len() {
                     data[i + c] = sample_val;
                 }
             }
-            i += channels;
+            i += ctx.channels;
 
             s.sample_in_frame += 1;
-            if s.sample_in_frame >= samples_per_frame {
+            if s.sample_in_frame >= ctx.samples_per_frame {
                 s.sample_in_frame = 0;
                 s.frame_idx += 1;
 
                 if s.frame_idx >= total_frames {
-                    if let Some(l_start) = loop_start {
+                    if let Some(l_start) = ctx.loop_start {
                         s.frame_idx = l_start;
                     } else {
                         s.finished = true;
-                        finished_atomic.store(true, Ordering::Relaxed);
+                        ctx.finished.store(true, Ordering::Relaxed);
                         return;
                     }
                 }
 
                 let idx = s.frame_idx;
-                apply(
-                    &frames[idx],
+                (ctx.apply)(
+                    &ctx.frames[idx],
                     &mut s.chip,
                     &mut s.mixer,
                     &mut s.last_env_shape,
                 );
-                current_frame_atomic.store(idx, Ordering::Relaxed);
+                ctx.current_frame.store(idx, Ordering::Relaxed);
             }
         }
     }
@@ -291,17 +294,16 @@ impl AudioPlayer {
                     let mut s = state_cb
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    Self::fill_audio_buffer(
-                        data,
-                        &mut s,
-                        &frames_cb,
-                        &finished_cb,
-                        &current_frame_cb,
+                    let ctx = AudioFillContext {
+                        frames: &frames_cb,
+                        finished: &finished_cb,
+                        current_frame: &current_frame_cb,
                         channels,
                         samples_per_frame,
                         loop_start,
-                        &apply,
-                    );
+                        apply: &apply,
+                    };
+                    Self::fill_audio_buffer(data, &mut s, &ctx);
                 },
                 err_fn,
                 None,
