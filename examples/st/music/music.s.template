@@ -1,0 +1,17 @@
+; =========================================================
+; music.s.template -- Per-song Atari ST music module template
+; =========================================================
+; Usage: Make builds this into build/<songname>.music.s for each .ym file:
+;
+;   .include "../include/st.inc"
+;   .include "../include/ym2149.inc"
+;   .include "ysg.inc"
+;
+;   .text
+;   .globl music_data
+; music_data:
+;   .incbin "build/<songname>.ysg"
+;   .even
+;
+;   .include "ysg_player.s"
+; =========================================================

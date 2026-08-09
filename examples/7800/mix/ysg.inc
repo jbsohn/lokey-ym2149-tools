@@ -30,4 +30,6 @@
     music_acc       .word       ; rate-conversion accumulator
     music_delta     .word       ; rate-conversion step per display frame
     v_frame         .word       ; display frame counter (for visuals)
+    rle_count       .byte       ; remaining idle frames from RLE token
 .endstruct
+

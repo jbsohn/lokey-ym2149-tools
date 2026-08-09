@@ -59,6 +59,11 @@ enum MainCommands {
         /// Source chip clock in Hz (default: 2000000 for ST)
         #[arg(long)]
         clock: Option<u32>,
+
+        /// Target chip clock in Hz to scale pitch for (default: 1789773 for
+        /// Atari 7800; pass 2000000 to keep an Atari ST source at native pitch)
+        #[arg(long)]
+        target_clock: Option<u32>,
     },
 }
 
@@ -79,6 +84,11 @@ enum SongCommands {
 
         #[arg(long)]
         clock: Option<u32>,
+
+        /// Target chip clock in Hz to scale pitch for (default: 1789773 for
+        /// Atari 7800; pass 2000000 to keep an Atari ST source at native pitch)
+        #[arg(long)]
+        target_clock: Option<u32>,
 
         #[arg(short, long, default_value_t = 1)]
         step: usize,
@@ -234,8 +244,9 @@ fn with_spinner<T>(message: &str, f: impl FnOnce() -> T) -> T {
 fn load_song(
     input: &Path,
     clock_override: Option<u32>,
+    target_clock_override: Option<u32>,
 ) -> Result<YmSequence, Box<dyn std::error::Error>> {
-    YmSequence::load_from_path(input, clock_override)
+    YmSequence::load_from_path(input, clock_override, target_clock_override)
 }
 
 fn load_sfx(input: &Path, bank_index: usize) -> Result<SfxSequence, Box<dyn std::error::Error>> {
@@ -277,6 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 hz,
                 clock,
+                target_clock,
                 step,
                 compression,
                 no_dedup,
@@ -287,6 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 hz,
                 clock,
+                target_clock,
                 step,
                 compression,
                 no_dedup,
@@ -309,7 +322,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             channel,
             hz,
             clock,
-        } => run_mix(&song, &sfx, channel, hz, clock),
+            target_clock,
+        } => run_mix(&song, &sfx, channel, hz, clock, target_clock),
     }
 }
 
@@ -321,7 +335,7 @@ fn run_song_dump(
     let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
     let ym_data = fs::read(input)?;
     let (sequence, _) = with_spinner("Decoding...", || {
-        YmSequence::from_ym_data(name, &ym_data, None)
+        YmSequence::from_ym_data(name, &ym_data, None, None)
     })?;
 
     let end = (start + frames).min(sequence.frames.len());
@@ -364,6 +378,7 @@ fn run_song_render(
     output: Option<PathBuf>,
     hz: Option<HzOption>,
     clock: Option<u32>,
+    target_clock: Option<u32>,
     step: usize,
     compression: CompressionArg,
     no_dedup: bool,
@@ -390,7 +405,7 @@ fn run_song_render(
         let bytes = fs::read(input)?;
         original_ym_size = Some(YmSequence::ym_decompressed_len(&bytes)?);
         with_spinner("Decoding YM chiptune...", || {
-            YmSequence::from_ym_data(name, &bytes, clock)
+            YmSequence::from_ym_data(name, &bytes, clock, target_clock)
         })?
     } else {
         let content = fs::read_to_string(input)?;
@@ -604,7 +619,7 @@ fn run_song_play(
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
     if extension == "json" || extension == "ysg" {
-        let mut sequence = load_song(input, None)?;
+        let mut sequence = load_song(input, None, None)?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = hz_override.into();
         }
@@ -619,7 +634,7 @@ fn run_song_play(
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
         let ym_data = fs::read(input)?;
         let (mut sequence, _) = with_spinner("Decoding YM via YmSequence pipeline...", || {
-            YmSequence::from_ym_data(name, &ym_data, None)
+            YmSequence::from_ym_data(name, &ym_data, None, None)
         })?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = hz_override.into();
@@ -729,13 +744,14 @@ fn run_mix(
     channel: ChannelArg,
     hz: Option<HzOption>,
     clock: Option<u32>,
+    target_clock: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{} Loading song {}...",
         style("LOADING SONG:").bold().cyan(),
         style(song.display()).cyan()
     );
-    let mut song_seq = load_song(song, clock)?;
+    let mut song_seq = load_song(song, clock, target_clock)?;
 
     println!(
         "{} Loading sound effect bank...",
