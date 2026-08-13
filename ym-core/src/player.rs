@@ -24,6 +24,23 @@ fn ym_channel_to_idx(ch: YmChannel) -> usize {
     }
 }
 
+/// Picks which channel a newly triggered SFX should play on: `preferred` if it's
+/// free, otherwise the first free channel trying C, then B, then A, otherwise
+/// (all three busy) `preferred` itself, cutting off whatever was already playing there.
+fn pick_sfx_channel(active: &[Option<PlayingSfx>; 3], preferred: usize) -> usize {
+    if active[preferred].is_none() {
+        preferred
+    } else if active[2].is_none() {
+        2
+    } else if active[1].is_none() {
+        1
+    } else if active[0].is_none() {
+        0
+    } else {
+        preferred
+    }
+}
+
 fn calculate_samples_per_frame(sample_rate: u32, hz: u32) -> usize {
     let hz_valid = hz.max(1);
     (f64::from(sample_rate) / f64::from(hz_valid)).round() as usize
@@ -352,17 +369,7 @@ impl YmMixer {
         let Some(frames) = self.sfx_frames_list.get(sfx_idx) else {
             return;
         };
-        let target_ch = if self.active_sfx[self.preferred_chan_idx].is_none() {
-            self.preferred_chan_idx
-        } else if self.active_sfx[2].is_none() {
-            2
-        } else if self.active_sfx[1].is_none() {
-            1
-        } else if self.active_sfx[0].is_none() {
-            0
-        } else {
-            self.preferred_chan_idx
-        };
+        let target_ch = pick_sfx_channel(&self.active_sfx, self.preferred_chan_idx);
 
         self.active_sfx[target_ch] = Some(PlayingSfx {
             frames: Arc::clone(frames),
@@ -520,5 +527,59 @@ impl YmDataRenderer {
     #[must_use]
     pub fn duration_seconds(&self) -> f64 {
         self.duration_seconds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn busy_slot() -> PlayingSfx {
+        PlayingSfx {
+            frames: Arc::from(Vec::<SfxFrame>::new()),
+            current_idx: 0,
+        }
+    }
+
+    #[test]
+    fn pick_sfx_channel_prefers_preferred_when_free() {
+        let active = [None, None, None];
+        assert_eq!(pick_sfx_channel(&active, 0), 0);
+        assert_eq!(pick_sfx_channel(&active, 1), 1);
+        assert_eq!(pick_sfx_channel(&active, 2), 2);
+    }
+
+    #[test]
+    fn pick_sfx_channel_steals_c_then_b_then_a_when_preferred_busy() {
+        let preferred = 0; // channel A
+
+        // A (preferred) busy, C and B free -> steals C first.
+        let active = [Some(busy_slot()), None, None];
+        assert_eq!(pick_sfx_channel(&active, preferred), 2);
+
+        // A and C busy, B free -> steals B.
+        let active = [Some(busy_slot()), None, Some(busy_slot())];
+        assert_eq!(pick_sfx_channel(&active, preferred), 1);
+    }
+
+    #[test]
+    fn pick_sfx_channel_falls_back_to_preferred_when_all_busy() {
+        let active = [Some(busy_slot()), Some(busy_slot()), Some(busy_slot())];
+        assert_eq!(pick_sfx_channel(&active, 0), 0);
+        assert_eq!(pick_sfx_channel(&active, 1), 1);
+        assert_eq!(pick_sfx_channel(&active, 2), 2);
+    }
+
+    #[test]
+    fn pick_sfx_channel_skips_to_b_when_preferred_is_c() {
+        // Preferred is C, so the "is C free" re-check is a no-op; priority
+        // should fall straight through to B, then A.
+        let preferred = 2;
+
+        let active = [None, None, Some(busy_slot())];
+        assert_eq!(pick_sfx_channel(&active, preferred), 1);
+
+        let active = [None, Some(busy_slot()), Some(busy_slot())];
+        assert_eq!(pick_sfx_channel(&active, preferred), 0);
     }
 }
