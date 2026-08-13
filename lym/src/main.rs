@@ -1,16 +1,15 @@
+pub mod audio;
+
+use audio::{AudioConfig, AudioPlayer};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use console::{style, Key};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use ym2149::{Ym2149, Ym2149Backend};
 use ym_core::{
-    spawn_key_listener, AudioPlayer, CompilerOptions, CompressionLevel, DeltaCompiler, HzOption,
-    SfxFrame, SfxSequence, SystemHz, YmChannel, YmFrame, YmSequence, YmSongDetails,
+    CompilerOptions, CompressionLevel, DeltaCompiler, HzOption, SfxSequence, SystemHz, YmChannel,
+    YmFrame, YmSequence, YmSongDetails,
 };
 
 #[derive(Parser, Debug)]
@@ -53,7 +52,7 @@ enum MainCommands {
 
         /// Timing refresh rate override (50 or 60 Hz)
         #[arg(long, value_enum)]
-        hz: Option<HzOption>,
+        hz: Option<HzOptionArg>,
 
         /// Source chip clock in Hz (default: 2000000 for ST)
         #[arg(long)]
@@ -77,7 +76,7 @@ struct SongRenderArgs {
     output: Option<PathBuf>,
 
     #[arg(long, value_enum)]
-    hz: Option<HzOption>,
+    hz: Option<HzOptionArg>,
 
     #[arg(long)]
     clock: Option<u32>,
@@ -131,11 +130,28 @@ enum SongCommands {
         input: PathBuf,
 
         #[arg(long, value_enum)]
-        hz: Option<HzOption>,
+        hz: Option<HzOptionArg>,
 
         #[arg(long)]
         via_sequence: bool,
     },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+enum HzOptionArg {
+    #[value(name = "50")]
+    Hz50,
+    #[value(name = "60")]
+    Hz60,
+}
+
+impl From<HzOptionArg> for HzOption {
+    fn from(opt: HzOptionArg) -> Self {
+        match opt {
+            HzOptionArg::Hz50 => HzOption::Hz50,
+            HzOptionArg::Hz60 => HzOption::Hz60,
+        }
+    }
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -163,7 +179,7 @@ struct SfxCommonArgs {
     input: PathBuf,
 
     #[arg(long, value_enum)]
-    hz: Option<HzOption>,
+    hz: Option<HzOptionArg>,
 
     #[arg(long)]
     clock: Option<u32>,
@@ -206,28 +222,8 @@ impl From<ChannelArg> for YmChannel {
     }
 }
 
-fn channel_arg_to_idx(c: ChannelArg) -> usize {
-    match c {
-        ChannelArg::A => 0,
-        ChannelArg::B => 1,
-        ChannelArg::C => 2,
-    }
-}
-
-fn idx_to_ym_channel(idx: usize) -> YmChannel {
-    match idx {
-        0 => YmChannel::A,
-        1 => YmChannel::B,
-        _ => YmChannel::C,
-    }
-}
-
 fn f64_to_u32(val: f64) -> u32 {
     val as u32
-}
-
-fn f64_to_usize(val: f64) -> usize {
-    val as usize
 }
 
 fn usize_to_f64(val: usize) -> f64 {
@@ -259,269 +255,6 @@ fn load_sfx(input: &Path, bank_index: usize) -> Result<SfxSequence, Box<dyn std:
 
 fn load_all_sfx(inputs: &[PathBuf]) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>> {
     SfxSequence::load_all_from_paths(inputs)
-}
-
-#[derive(Clone)]
-struct PlayingSfx {
-    frames: Arc<[SfxFrame]>,
-    current_idx: usize,
-}
-
-struct MixerState {
-    chip: Ym2149,
-    song_frame_idx: usize,
-    sample_in_frame: usize,
-    mixer: u8,
-    last_env_shape: Option<u8>,
-    finished: bool,
-    active_sfx: [Option<PlayingSfx>; 3],
-}
-
-/// Everything the mix audio callback captures once per stream and reuses on every
-/// invocation, bundled so `fill_mix_buffer` doesn't need a separate argument for each one.
-struct MixCallbackContext<'a> {
-    song_frames: &'a [YmFrame],
-    finished: &'a AtomicBool,
-    current_frame: &'a AtomicUsize,
-    channels: usize,
-    samples_per_frame: usize,
-    total_song_frames: usize,
-    loop_start: Option<usize>,
-}
-
-/// Clocks the chip for one audio callback's worth of samples, advancing the song
-/// frame (and any active SFX on top of it) every `samples_per_frame` samples.
-fn fill_mix_buffer(data: &mut [f32], s: &mut MixerState, ctx: &MixCallbackContext<'_>) {
-    if s.finished {
-        for sample in data.iter_mut() {
-            *sample = 0.0;
-        }
-        ctx.finished.store(true, Ordering::Relaxed);
-        return;
-    }
-
-    let mut i = 0;
-    while i < data.len() {
-        let sample_val = s.chip.get_sample();
-        s.chip.clock();
-
-        for c in 0..ctx.channels {
-            if i + c < data.len() {
-                data[i + c] = sample_val;
-            }
-        }
-        i += ctx.channels;
-
-        s.sample_in_frame += 1;
-        if s.sample_in_frame >= ctx.samples_per_frame {
-            s.sample_in_frame = 0;
-            s.song_frame_idx += 1;
-
-            if s.song_frame_idx >= ctx.total_song_frames {
-                if let Some(l_start) = ctx.loop_start {
-                    s.song_frame_idx = l_start;
-                } else {
-                    s.finished = true;
-                    ctx.finished.store(true, Ordering::Relaxed);
-                    return;
-                }
-            }
-
-            let song_idx = s.song_frame_idx;
-            ctx.current_frame.store(song_idx, Ordering::Relaxed);
-
-            if let Some(sf) = ctx.song_frames.get(song_idx) {
-                sf.apply_to_chip(&mut s.chip, &mut s.mixer, &mut s.last_env_shape);
-            }
-
-            for ch in 0..3 {
-                if let Some(ref mut active) = s.active_sfx[ch] {
-                    if active.current_idx < active.frames.len() {
-                        let frame = &active.frames[active.current_idx];
-                        frame.apply_to_chip(&mut s.chip, &mut s.mixer, idx_to_ym_channel(ch));
-                        active.current_idx += 1;
-                    } else {
-                        s.active_sfx[ch] = None;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Prints the keyboard trigger for each of the first 10 loaded SFX.
-fn print_sfx_keybindings(sfx_list: &[SfxSequence]) {
-    for (idx, sfx_item) in sfx_list.iter().enumerate().take(10) {
-        let key_label = match idx {
-            0 => "1 or SPACEBAR".to_string(),
-            1..=8 => format!("{}", idx + 1),
-            _ => "0".to_string(),
-        };
-        println!(
-            "  [{}] Key {}: {} ({} frames)",
-            style(idx).dim(),
-            style(key_label).yellow().bold(),
-            style(&sfx_item.name).cyan(),
-            sfx_item.frames.len()
-        );
-    }
-}
-
-/// Rebuilds absolute chip register state and jumps song playback to `target_idx`.
-/// Song frames are sparse diffs, so seeking requires replaying every frame's
-/// register writes from the start (cheap: integer writes, no audio synthesis).
-fn seek_song(
-    state: &Mutex<MixerState>,
-    current_frame_atomic: &AtomicUsize,
-    song_frames: &[YmFrame],
-    target_idx: usize,
-    master_clock_hz: u32,
-    sample_rate: u32,
-) {
-    let mut scratch_chip = Ym2149::with_clocks(master_clock_hz, sample_rate);
-    let mut mixer = 0x3F;
-    let mut last_env_shape = None;
-    for f in &song_frames[..=target_idx] {
-        f.apply_to_chip(&mut scratch_chip, &mut mixer, &mut last_env_shape);
-    }
-
-    let mut s = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    s.chip = scratch_chip;
-    s.song_frame_idx = target_idx;
-    s.sample_in_frame = 0;
-    s.mixer = mixer;
-    s.last_env_shape = last_env_shape;
-    drop(s);
-    current_frame_atomic.store(target_idx, Ordering::Relaxed);
-}
-
-/// Maps a keyboard trigger key to its SFX bank slot (`SPACE`/`1`-`9`/`0` -> `0`-`9`).
-fn key_to_sfx_index(key: &Key) -> Option<usize> {
-    match key {
-        Key::Char(' ' | '1') => Some(0),
-        Key::Char('2') => Some(1),
-        Key::Char('3') => Some(2),
-        Key::Char('4') => Some(3),
-        Key::Char('5') => Some(4),
-        Key::Char('6') => Some(5),
-        Key::Char('7') => Some(6),
-        Key::Char('8') => Some(7),
-        Key::Char('9') => Some(8),
-        Key::Char('0') => Some(9),
-        _ => None,
-    }
-}
-
-/// Starts SFX bank slot `sfx_idx` playing on the first available channel, preferring
-/// `preferred_chan_idx` and falling back to C, B, then A if it's already busy.
-fn trigger_sfx(
-    state: &Mutex<MixerState>,
-    sfx_frames_list: &[Arc<[SfxFrame]>],
-    sfx_idx: usize,
-    preferred_chan_idx: usize,
-) {
-    let Some(frames) = sfx_frames_list.get(sfx_idx) else {
-        return;
-    };
-    let mut s = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let target_ch = if s.active_sfx[preferred_chan_idx].is_none() {
-        preferred_chan_idx
-    } else if s.active_sfx[2].is_none() {
-        2
-    } else if s.active_sfx[1].is_none() {
-        1
-    } else if s.active_sfx[0].is_none() {
-        0
-    } else {
-        preferred_chan_idx
-    };
-
-    s.active_sfx[target_ch] = Some(PlayingSfx {
-        frames: Arc::clone(frames),
-        current_idx: 0,
-    });
-}
-
-/// Everything the interactive mix loop needs to handle keyboard input and report
-/// progress, bundled so `run_mix_loop` doesn't need a separate argument for each one.
-struct MixLoopContext<'a> {
-    state: &'a Mutex<MixerState>,
-    current_frame_atomic: &'a AtomicUsize,
-    finished_atomic: &'a AtomicBool,
-    song_frames: &'a [YmFrame],
-    sfx_frames_list: &'a [Arc<[SfxFrame]>],
-    song_hz: u32,
-    total_song_frames: usize,
-    master_clock_hz: u32,
-    sample_rate: u32,
-    preferred_chan_idx: usize,
-}
-
-/// Drives interactive mix playback: polls keyboard input for quit/seek/SFX-trigger
-/// commands and updates the progress bar, until playback finishes or the user quits.
-fn run_mix_loop(key_rx: &mpsc::Receiver<Key>, pb: &ProgressBar, ctx: &MixLoopContext<'_>) {
-    loop {
-        while let Ok(key) = key_rx.try_recv() {
-            if matches!(key, Key::Char('q' | 'Q')) {
-                let mut s = ctx
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                s.finished = true;
-                ctx.finished_atomic.store(true, Ordering::Relaxed);
-                break;
-            }
-
-            if matches!(key, Key::ArrowRight | Key::ArrowLeft) {
-                let step_frames = (ctx.song_hz as usize) * 5;
-                let current_idx = {
-                    let s = ctx
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    s.song_frame_idx
-                };
-                let target_idx = match key {
-                    Key::ArrowRight => current_idx
-                        .saturating_add(step_frames)
-                        .min(ctx.total_song_frames.saturating_sub(1)),
-                    Key::ArrowLeft => current_idx.saturating_sub(step_frames),
-                    _ => current_idx,
-                };
-
-                seek_song(
-                    ctx.state,
-                    ctx.current_frame_atomic,
-                    ctx.song_frames,
-                    target_idx,
-                    ctx.master_clock_hz,
-                    ctx.sample_rate,
-                );
-            }
-
-            if let Some(sfx_idx) = key_to_sfx_index(&key) {
-                trigger_sfx(
-                    ctx.state,
-                    ctx.sfx_frames_list,
-                    sfx_idx,
-                    ctx.preferred_chan_idx,
-                );
-            }
-        }
-
-        let current = ctx.current_frame_atomic.load(Ordering::Relaxed);
-        pb.set_position(current as u64);
-
-        if ctx.finished_atomic.load(Ordering::Relaxed) {
-            break;
-        }
-
-        std::thread::sleep(Duration::from_millis(15));
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -561,8 +294,9 @@ fn run_song_dump(
     frames: usize,
     start: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sequence =
-        with_spinner("Decoding...", || YmSequence::load_from_path(input, None, None))?;
+    let sequence = with_spinner("Decoding...", || {
+        YmSequence::load_from_path(input, None, None)
+    })?;
 
     let end = (start + frames).min(sequence.frames.len());
     println!(
@@ -628,7 +362,7 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         style(input.display()).cyan()
     );
     sequence.frames = decimate_frames(&sequence.frames, step);
-    apply_frame_rate(&mut sequence, hz, step);
+    apply_frame_rate(&mut sequence, hz.map(Into::into), step);
     let compiler = DeltaCompiler::new();
     let compression_level: CompressionLevel = compression.into();
     let compiler_options = CompilerOptions {
@@ -898,7 +632,7 @@ fn print_size_comparison(original_size: usize, new_size: usize) {
 
 fn run_song_play(
     input: &Path,
-    hz: Option<HzOption>,
+    hz: Option<HzOptionArg>,
     via_sequence: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
@@ -906,7 +640,7 @@ fn run_song_play(
     if extension == "json" || extension == "ysg" {
         let mut sequence = load_song(input, None, None)?;
         if let Some(hz_override) = hz {
-            sequence.timing.frame_rate = hz_override.into();
+            sequence.timing.frame_rate = HzOption::from(hz_override).into();
         }
         println!(
             "{} {} ({} Hz)...",
@@ -914,7 +648,7 @@ fn run_song_play(
             style(input.display()).cyan(),
             sequence.timing.frame_rate.hz_value()
         );
-        AudioPlayer::play(&sequence)?;
+        AudioPlayer::play_song(&sequence, &AudioConfig::default())?;
     } else if via_sequence && extension.eq_ignore_ascii_case("ym") {
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
         let ym_data = fs::read(input)?;
@@ -922,7 +656,7 @@ fn run_song_play(
             YmSequence::from_ym_data(name, &ym_data, None, None)
         })?;
         if let Some(hz_override) = hz {
-            sequence.timing.frame_rate = hz_override.into();
+            sequence.timing.frame_rate = HzOption::from(hz_override).into();
         }
         println!(
             "{} {} ({} frames @ {} Hz)...",
@@ -931,7 +665,7 @@ fn run_song_play(
             sequence.frames.len(),
             sequence.timing.frame_rate.hz_value()
         );
-        AudioPlayer::play(&sequence)?;
+        AudioPlayer::play_song(&sequence, &AudioConfig::default())?;
     } else {
         println!(
             "{} {}...",
@@ -939,7 +673,7 @@ fn run_song_play(
             style(input.display()).cyan()
         );
         let ym_data = fs::read(input)?;
-        AudioPlayer::play_ym_data(&ym_data)?;
+        AudioPlayer::play_ym_data(&ym_data, &AudioConfig::default())?;
     }
 
     Ok(())
@@ -965,7 +699,7 @@ fn run_sfx_render(
         sequence.source_clock = c;
     }
     if let Some(hz_override) = args.hz {
-        sequence.source_hz = SystemHz::from(hz_override).hz_value();
+        sequence.source_hz = SystemHz::from(HzOption::from(hz_override)).hz_value();
     }
 
     let compiler = DeltaCompiler::new();
@@ -1009,7 +743,7 @@ fn run_sfx_play(args: &SfxCommonArgs) -> Result<(), Box<dyn std::error::Error>> 
         sequence.source_clock = c;
     }
     if let Some(hz_override) = args.hz {
-        sequence.source_hz = SystemHz::from(hz_override).hz_value();
+        sequence.source_hz = SystemHz::from(HzOption::from(hz_override)).hz_value();
     }
 
     println!(
@@ -1018,16 +752,15 @@ fn run_sfx_play(args: &SfxCommonArgs) -> Result<(), Box<dyn std::error::Error>> 
         style(args.input.display()).cyan(),
         sequence.source_hz
     );
-    AudioPlayer::play_sfx(&sequence)?;
+    AudioPlayer::play_sfx(&sequence, &AudioConfig::default())?;
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_mix(
     song: &Path,
     sfx: &[PathBuf],
     channel: ChannelArg,
-    hz: Option<HzOption>,
+    hz: Option<HzOptionArg>,
     clock: Option<u32>,
     target_clock: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1049,123 +782,15 @@ fn run_mix(
         style(sfx_list.len()).cyan()
     );
 
-    print_sfx_keybindings(&sfx_list);
-
     if let Some(hz_override) = hz {
-        song_seq.timing.frame_rate = hz_override.into();
+        song_seq.timing.frame_rate = HzOption::from(hz_override).into();
     }
 
-    let song_hz = song_seq.timing.frame_rate.hz_value();
-    let preferred_chan_idx = channel_arg_to_idx(channel);
-
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("No output audio device found")?;
-    let config = device.default_output_config()?;
-    let sample_rate = config.sample_rate();
-    let channels = config.channels() as usize;
-    let sample_format = config.sample_format();
-    let stream_config: cpal::StreamConfig = config.into();
-
-    let sample_rate_u32: u32 = sample_rate;
-    let samples_per_frame = f64_to_usize(
-        (f64::from(sample_rate_u32) / f64::from(song_hz))
-            .round()
-            .max(1.0),
-    );
-    let mut chip = Ym2149::with_clocks(song_seq.timing.master_clock_hz, sample_rate_u32);
-
-    let song_frames: Arc<[YmFrame]> = song_seq.frames.as_slice().into();
-    let sfx_frames_list: Vec<Arc<[SfxFrame]>> = sfx_list
-        .iter()
-        .map(|s| s.frames.as_slice().into())
-        .collect();
-    let total_song_frames = song_frames.len();
-
-    let mut mixer = 0x3F;
-    let mut last_env_shape = None;
-
-    if !song_frames.is_empty() {
-        song_frames[0].apply_to_chip(&mut chip, &mut mixer, &mut last_env_shape);
-    }
-
-    let state = Arc::new(Mutex::new(MixerState {
-        chip,
-        song_frame_idx: 0,
-        sample_in_frame: 0,
-        mixer,
-        last_env_shape,
-        finished: false,
-        active_sfx: [None, None, None],
-    }));
-
-    let current_frame_atomic = Arc::new(AtomicUsize::new(0));
-    let finished_atomic = Arc::new(AtomicBool::new(false));
-
-    let state_cb = Arc::clone(&state);
-    let current_frame_cb = Arc::clone(&current_frame_atomic);
-    let finished_cb = Arc::clone(&finished_atomic);
-    let song_frames_cb = Arc::clone(&song_frames);
-    let loop_start = song_seq.loop_start.or(Some(0));
-
-    let err_fn = |err| eprintln!("{} {}", style("Audio stream error:").red().bold(), err);
-
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_output_stream(
-            stream_config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut s = state_cb
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let ctx = MixCallbackContext {
-                    song_frames: &song_frames_cb,
-                    finished: &finished_cb,
-                    current_frame: &current_frame_cb,
-                    channels,
-                    samples_per_frame,
-                    total_song_frames,
-                    loop_start,
-                };
-                fill_mix_buffer(data, &mut s, &ctx);
-            },
-            err_fn,
-            None,
-        )?,
-        _ => return Err("Unsupported audio sample format".into()),
-    };
-
-    stream.play()?;
-
-    let pb = ProgressBar::new(total_song_frames as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len} {msg}",
-        )?
-            .progress_chars("=>-"),
-    );
-
-    pb.set_message(format!(
-        " Press \u{2190}/\u{2192} to seek, 1-9/0/SPACE to trigger SFX, 'q' to quit (Primary Ch: {channel:?})"
-    ));
-
-    let key_rx = spawn_key_listener();
-
-    let loop_ctx = MixLoopContext {
-        state: &state,
-        current_frame_atomic: &current_frame_atomic,
-        finished_atomic: &finished_atomic,
-        song_frames: &song_frames,
-        sfx_frames_list: &sfx_frames_list,
-        song_hz,
-        total_song_frames,
-        master_clock_hz: song_seq.timing.master_clock_hz,
-        sample_rate: sample_rate_u32,
-        preferred_chan_idx,
-    };
-    run_mix_loop(&key_rx, &pb, &loop_ctx);
-
-    pb.finish_with_message("Playback finished.");
-    let _ = std::process::Command::new("stty").arg("sane").status();
+    AudioPlayer::play_mix(
+        &song_seq,
+        &sfx_list,
+        channel.into(),
+        &AudioConfig::default(),
+    )?;
     Ok(())
 }

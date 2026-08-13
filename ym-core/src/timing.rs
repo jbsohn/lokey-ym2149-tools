@@ -4,12 +4,10 @@ pub const ATARI_7800_CLOCK: u32 = 1_789_773;
 pub const ATARI_ST_CLOCK: u32 = 2_000_000;
 pub const ZX_SPECTRUM_CLOCK: u32 = 1_773_400;
 
-/// Shared CLI value enum for Hz selection, usable by both ym-sfx and ym-song.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+/// Supported refresh rate selection (50 Hz or 60 Hz).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum HzOption {
-    #[value(name = "50")]
     Hz50,
-    #[value(name = "60")]
     Hz60,
 }
 

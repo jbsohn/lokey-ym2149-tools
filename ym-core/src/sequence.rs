@@ -503,7 +503,8 @@ impl YmSequence {
             }
             "ym" => {
                 let bytes = std::fs::read(input)?;
-                let (seq, _) = Self::from_ym_data(name, &bytes, clock_override, target_clock_override)?;
+                let (seq, _) =
+                    Self::from_ym_data(name, &bytes, clock_override, target_clock_override)?;
                 Ok(seq)
             }
             _ => Err(format!(

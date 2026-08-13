@@ -4,7 +4,7 @@ pub mod sequence;
 pub mod timing;
 
 pub use delta::{CompilerOptions, CompressionLevel, DeltaCompiler, YmSongDetails, RLE_FLAG};
-pub use player::{spawn_key_listener, AudioPlayer};
+pub use player::{YmDataRenderer, YmMixer, YmSfxRenderer, YmSongRenderer};
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
 pub use timing::{
     calculate_delay, HzOption, SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK,
@@ -271,5 +271,28 @@ mod tests {
     fn test_truncated_ysg_returns_err() {
         let truncated_bytes = vec![64, 2, 5, 0]; // 4 bytes instead of >=12
         assert!(YmSequence::from_ysg("bad", &truncated_bytes).is_err());
+    }
+
+    #[test]
+    fn test_song_renderer() {
+        let song = YmSequence {
+            name: "test".to_string(),
+            timing: TimingConfig::default(),
+            priority: 0,
+            loop_start: None,
+            frames: vec![YmFrame {
+                tone_a: Some(440),
+                volume_a: Some(15),
+                tone_enable_a: Some(true),
+                ..Default::default()
+            }],
+        };
+        let mut renderer = YmSongRenderer::new(&song, 44100);
+        assert_eq!(renderer.total_frames(), 1);
+        assert!(!renderer.is_finished());
+
+        let mut buf = vec![0.0f32; 1024];
+        renderer.render_samples(&mut buf, 2);
+        assert!(buf.iter().any(|&s| s != 0.0));
     }
 }

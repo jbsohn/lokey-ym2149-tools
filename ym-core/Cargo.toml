@@ -7,13 +7,9 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-clap.workspace = true
 ym2149.workspace = true
-cpal.workspace = true
 ym2149-ym-replayer.workspace = true
 ym2149-common.workspace = true
-indicatif.workspace = true
-console.workspace = true
 
 [lints]
 workspace = true
