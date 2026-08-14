@@ -1,4 +1,4 @@
-# lokey-ym-tools
+# lokey-ym2149-tools
 
 A comprehensive developer toolchain for compiling, auditing, and auditioning sound sequences and music streams targeting
 the Yamaha YM-2149 Programmable Sound Generator (PSG).
