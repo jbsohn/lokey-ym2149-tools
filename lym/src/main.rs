@@ -36,17 +36,21 @@ enum MainCommands {
         #[command(subcommand)]
         command: SfxCommands,
     },
-    /// Real-time interactive music & sound effect keyboard mixer
+    /// Real-time interactive music & sound effect keyboard mixer (supports YM2149 and TIA hybrid mixing)
     Mix {
         /// Input background song file (.ysg, .ym, .json)
         #[arg(short, long)]
         song: PathBuf,
 
-        /// One or more input sound effect files or banks (.yfx, .json, .csv, .afx, .afb)
-        #[arg(short = 'e', long, num_args = 1..)]
+        /// One or more input YM-2149 sound effect files or banks (.yfx, .json, .csv, .afx, .afb)
+        #[arg(short = 'e', long, num_args = 0..)]
         sfx: Vec<PathBuf>,
 
-        /// Preferred primary channel on which to play SFX (A, B, or C)
+        /// One or more input Atari TIA sound effect files (.tfx, .json, .csv)
+        #[arg(short = 't', long = "tia-sfx", num_args = 0..)]
+        tia_sfx: Vec<PathBuf>,
+
+        /// Preferred primary channel on which to play YM SFX (A, B, or C)
         #[arg(short, long, value_enum, default_value = "c")]
         channel: ChannelArg,
 
@@ -62,6 +66,59 @@ enum MainCommands {
         /// Atari 7800; pass 2000000 to keep an Atari ST source at native pitch)
         #[arg(long)]
         target_clock: Option<u32>,
+    },
+    /// Atari TIA sound chip tools (compile, play SFX and songs)
+    Tia {
+        #[command(subcommand)]
+        command: TiaCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TiaCommands {
+    /// Sound effect tools (render .tfx, play)
+    Sfx {
+        #[command(subcommand)]
+        command: TiaSfxCommands,
+    },
+    /// Music song tools (render .tsg, play)
+    Song {
+        #[command(subcommand)]
+        command: TiaSongCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TiaSfxCommands {
+    /// Render a TIA sound effect (.json, .csv) into compiled 3-byte binary stream (.tfx)
+    Render {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Audition and play a TIA sound effect sequence (.tfx, .json, .csv)
+    Play {
+        #[arg(short, long)]
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TiaSongCommands {
+    /// Render a TIA song sequence (.json) into compiled .tsg binary stream
+    Render {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "full")]
+        compression: CompressionArg,
+    },
+    /// Audition and play a TIA song sequence (.tsg, .json)
+    Play {
+        #[arg(short, long)]
+        input: PathBuf,
     },
 }
 
@@ -167,6 +224,16 @@ impl From<CompressionArg> for CompressionLevel {
             CompressionArg::Full => CompressionLevel::Full,
             CompressionArg::DeltaOnly => CompressionLevel::DeltaOnly,
             CompressionArg::None => CompressionLevel::None,
+        }
+    }
+}
+
+impl From<CompressionArg> for tia_core::CompressionLevel {
+    fn from(a: CompressionArg) -> Self {
+        match a {
+            CompressionArg::Full => tia_core::CompressionLevel::Full,
+            CompressionArg::DeltaOnly => tia_core::CompressionLevel::DeltaOnly,
+            CompressionArg::None => tia_core::CompressionLevel::None,
         }
     }
 }
@@ -281,11 +348,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         MainCommands::Mix {
             song,
             sfx,
+            tia_sfx,
             channel,
             hz,
             clock,
             target_clock,
-        } => run_mix(&song, &sfx, channel, hz, clock, target_clock),
+        } => run_mix(&song, &sfx, &tia_sfx, channel, hz, clock, target_clock),
+        MainCommands::Tia { command } => match command {
+            TiaCommands::Sfx { command } => match command {
+                TiaSfxCommands::Render { input, output } => run_tia_sfx_render(&input, output),
+                TiaSfxCommands::Play { input } => run_tia_sfx_play(&input),
+            },
+            TiaCommands::Song { command } => match command {
+                TiaSongCommands::Render {
+                    input,
+                    output,
+                    compression,
+                } => run_tia_song_render(&input, output, compression),
+                TiaSongCommands::Play { input } => run_tia_song_play(&input),
+            },
+        },
     }
 }
 
@@ -759,6 +841,7 @@ fn run_sfx_play(args: &SfxCommonArgs) -> Result<(), Box<dyn std::error::Error>> 
 fn run_mix(
     song: &Path,
     sfx: &[PathBuf],
+    tia_sfx: &[PathBuf],
     channel: ChannelArg,
     hz: Option<HzOptionArg>,
     clock: Option<u32>,
@@ -771,26 +854,195 @@ fn run_mix(
     );
     let mut song_seq = load_song(song, clock, target_clock)?;
 
-    println!(
-        "{} Loading sound effect bank...",
-        style("LOADING SFX:").bold().cyan()
-    );
-    let sfx_list = load_all_sfx(sfx)?;
-    println!(
-        "{} Loaded {} sound effect(s).",
-        style("SFX BANK READY:").bold().green(),
-        style(sfx_list.len()).cyan()
-    );
+    let ym_sfx_list = if sfx.is_empty() {
+        Vec::new()
+    } else {
+        println!(
+            "{} Loading YM sound effect bank...",
+            style("LOADING YM SFX:").bold().cyan()
+        );
+        let list = load_all_sfx(sfx)?;
+        println!(
+            "{} Loaded {} YM sound effect(s).",
+            style("YM SFX READY:").bold().green(),
+            style(list.len()).cyan()
+        );
+        list
+    };
+
+    let tia_sfx_list = if tia_sfx.is_empty() {
+        Vec::new()
+    } else {
+        println!(
+            "{} Loading TIA sound effect bank...",
+            style("LOADING TIA SFX:").bold().cyan()
+        );
+        let mut list = Vec::new();
+        for path in tia_sfx {
+            list.push(tia_core::TiaSfxSequence::from_file(path)?);
+        }
+        println!(
+            "{} Loaded {} TIA sound effect(s).",
+            style("TIA SFX READY:").bold().green(),
+            style(list.len()).cyan()
+        );
+        list
+    };
+
+    if ym_sfx_list.is_empty() && tia_sfx_list.is_empty() {
+        return Err(
+            "Please provide at least one YM SFX (--sfx / -e) or TIA SFX (--tia-sfx / -t)".into(),
+        );
+    }
 
     if let Some(hz_override) = hz {
         song_seq.timing.frame_rate = HzOption::from(hz_override).into();
     }
 
-    AudioPlayer::play_mix(
+    AudioPlayer::play_hybrid_mix(
         &song_seq,
-        &sfx_list,
+        &ym_sfx_list,
+        &tia_sfx_list,
         channel.into(),
         &AudioConfig::default(),
     )?;
+    Ok(())
+}
+
+fn run_tia_sfx_render(
+    input: &Path,
+    output: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sequence = tia_core::TiaSfxSequence::from_file(input)?;
+    let output_path = output.unwrap_or_else(|| input.with_extension("tfx"));
+    let compiler = tia_core::DeltaCompiler::new();
+    let binary = compiler.compile_sfx(&sequence);
+
+    fs::write(&output_path, &binary)?;
+
+    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("sfx");
+    let tfi_path = output_path.with_extension("tfi");
+    let scope_name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let (delay_y, delay_x) = tia_core::calculate_delay(sequence.source_hz);
+    let tfi_contents = format!(
+        "; ca65 include generated by lym for {}\n\
+         .scope {}\n\
+             NUM_FRAMES   = {}\n\
+             PLAYER_HZ    = {}\n\
+             SOURCE_CLOCK = {}\n\
+             TIA_DELAY    = {}\n\
+             TIA_FINE     = {}\n\
+         .endscope\n",
+        input.display(),
+        scope_name,
+        sequence.frames.len(),
+        sequence.source_hz,
+        sequence.source_clock,
+        delay_y,
+        delay_x,
+    );
+    fs::write(&tfi_path, tfi_contents)?;
+
+    println!(
+        "{} {} frames -> {} ({} bytes, {} Hz)",
+        style("RENDER SUCCESS:").bold().green(),
+        style(sequence.frames.len()).cyan(),
+        style(output_path.display()).cyan(),
+        style(binary.len()).cyan(),
+        style(sequence.source_hz).cyan()
+    );
+
+    Ok(())
+}
+
+fn run_tia_sfx_play(input: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let sequence = tia_core::TiaSfxSequence::from_file(input)?;
+    println!(
+        "{} {} ({} Hz)...",
+        style("LOADING TIA SFX:").bold().cyan(),
+        style(input.display()).cyan(),
+        sequence.source_hz
+    );
+    AudioPlayer::play_tia_sfx(&sequence, &AudioConfig::default())?;
+    Ok(())
+}
+
+fn run_tia_song_render(
+    input: &Path,
+    output: Option<PathBuf>,
+    compression: CompressionArg,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sequence = tia_core::TiaSequence::from_file(input)?;
+    let output_path = output.unwrap_or_else(|| input.with_extension("tsg"));
+    let compiler = tia_core::DeltaCompiler::new();
+    let details = compiler.compile_song(
+        &sequence,
+        compression.into(),
+        &tia_core::CompilerOptions::default(),
+    )?;
+
+    fs::write(&output_path, &details.bytes)?;
+
+    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+    let tsi_path = output_path.with_extension("tsi");
+    let scope_name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let hz_val = sequence.timing.frame_rate.hz_value();
+    let (delay_y, delay_x) = tia_core::calculate_delay(hz_val);
+    let tsi_contents = format!(
+        "; ca65 include generated by lym for {}\n\
+         .scope {}\n\
+             MAX_FRAMES   = {}\n\
+             PLAYER_HZ    = {}\n\
+             MASTER_CLOCK = {}\n\
+             TIA_DELAY    = {}\n\
+             TIA_FINE     = {}\n\
+             PATTERN_SIZE = {}\n\
+         .endscope\n",
+        input.display(),
+        scope_name,
+        sequence.frames.len(),
+        hz_val,
+        sequence.timing.master_clock_hz,
+        delay_y,
+        delay_x,
+        details.pattern_size,
+    );
+    fs::write(&tsi_path, tsi_contents)?;
+
+    println!(
+        "{} {} frames -> {} ({} bytes, pattern size: {})",
+        style("RENDER SUCCESS:").bold().green(),
+        style(sequence.frames.len()).cyan(),
+        style(output_path.display()).cyan(),
+        style(details.compiled_bytes).cyan(),
+        style(details.pattern_size).cyan()
+    );
+
+    Ok(())
+}
+
+fn run_tia_song_play(input: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let sequence = tia_core::TiaSequence::from_file(input)?;
+    AudioPlayer::play_tia_song(&sequence, &AudioConfig::default())?;
     Ok(())
 }

@@ -533,6 +533,7 @@ dependencies = [
  "cpal",
  "indicatif",
  "serde_json",
+ "tia-core",
  "ym-core",
 ]
 
@@ -1009,6 +1010,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.0",
+]
+
+[[package]]
+name = "tia-core"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

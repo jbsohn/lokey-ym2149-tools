@@ -4,9 +4,9 @@
 
 LYM_BIN := ../../target/release/lym
 
-.PHONY: all music mix clean help ensure-lym
+.PHONY: all music mix dual_chip_mix clean help ensure-lym
 
-all: ensure-lym music mix
+all: ensure-lym music mix dual_chip_mix
 
 ensure-lym:
 	@if [ ! -f "$(LYM_BIN)" ]; then \
@@ -22,16 +22,22 @@ mix: ensure-lym
 	@echo "=== Building Atari 7800 Music & SFX Mix Sample ==="
 	@$(MAKE) -C mix all
 
+dual_chip_mix: ensure-lym
+	@echo "=== Building Atari 7800 Dual-Chip (YM-2149 + TIA) Mix Sample ==="
+	@$(MAKE) -C dual_chip_mix all
+
 clean:
 	@echo "=== Cleaning Atari 7800 Examples ==="
 	@$(MAKE) -C music clean
 	@$(MAKE) -C mix clean
+	@$(MAKE) -C dual_chip_mix clean
 
 help:
 	@echo "Atari 7800 Sample Builds"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make all       Build all 7800 samples (auto-builds 'lym' via cargo if missing)"
-	@echo "  make music     Build music sample ROMs"
-	@echo "  make mix       Build interactive music & SFX mix sample ROM"
-	@echo "  make clean     Remove all build artifacts across subdirectories"
+	@echo "  make all             Build all 7800 samples (auto-builds 'lym' via cargo if missing)"
+	@echo "  make music           Build music sample ROMs"
+	@echo "  make mix             Build YM-only music & SFX mix sample ROM"
+	@echo "  make dual_chip_mix   Build 5-channel dual-chip (YM2149 + TIA) sample ROM"
+	@echo "  make clean           Remove all build artifacts across subdirectories"

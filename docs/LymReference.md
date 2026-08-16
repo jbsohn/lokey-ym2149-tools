@@ -185,12 +185,11 @@ conflict arbitration.
 lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 ```
 
-#### Options:
-
 | Option           | Flag | Description                                                                                             | Default                |
 |:-----------------|:-----|:--------------------------------------------------------------------------------------------------------|:-----------------------|
 | `--song`         | `-s` | **Required**. Background song file (`.ysg`, `.ym`, `.json`).                                            | —                      |
-| `--sfx`          | `-e` | **Required**. One or more sound effect files or banks (`.yfx`, `.json`, `.csv`, `.afx`, `.afb`).        | —                      |
+| `--sfx`          | `-e` | One or more YM-2149 sound effect files or banks (`.yfx`, `.json`, `.csv`, `.afx`, `.afb`).               | None                   |
+| `--tia-sfx`      | `-t` | One or more Atari TIA sound effect files (`.tfx`, `.json`, `.csv`).                                      | None                   |
 | `--channel`      | `-c` | Preferred primary YM channel for sound effects (`a`, `b`, or `c`).                                      | `c`                    |
 | `--hz`           |      | Playback rate override (`50` or `60` Hz).                                                               | Song default           |
 | `--clock`        |      | Source chip clock in Hz.                                                                                | `2000000` (Atari ST)   |
@@ -198,11 +197,49 @@ lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 
 #### Interactive Key Controls:
 
-* `1`–`9`, `0`, `SPACE`: Trigger sound effects from loaded bank.
+* `1`–`5`: Trigger YM-2149 sound effects (overlaying/ducking PSG music channels).
+* `6`–`0`, `SPACE`, `Z`, `X`: Trigger Atari TIA sound effects (playing on independent TIA channels 0 and 1 with **zero voice stealing**).
 * `←` / `→`: Seek backward / forward by 5-second intervals.
 * `q` / `Q`: Mute audio and quit mixer.
 
 > [!TIP]
-> **Jam Session Workflow**: Use `lym mix` as your interactive audio sandbox. Tap keys `1`-`9` while your track loops to
-make sure laser and explosion SFX cleanly override music channels without causing envelope clicks or channel distortion.
+> **Hybrid Dual-Chip Audio Sandbox**: Use `lym mix --song song.ym --tia-sfx laser.json boom.json` to audition 3-channel
+> YM2149 background music and 2-channel TIA sound effects playing simultaneously directly on your workstation before
+> flashing to Atari 7800 hardware.
 
+---
+
+## 4. Atari TIA Subcommands (`lym tia`)
+
+### `lym tia sfx render`
+
+Compiles a TIA sound effect source (`.json`, `.csv`) into a fixed-width 3-byte `.tfx` payload (`[AUDF, AUDC, AUDV]` per frame)
+and generates a `.tfi` ca65 assembly include file.
+
+```bash
+lym tia sfx render --input tests/fixtures/sfx/tia_laser.json
+```
+
+### `lym tia sfx play`
+
+Auditions a TIA sound effect (`.tfx`, `.json`, `.csv`) over host speakers.
+
+```bash
+lym tia sfx play --input tests/fixtures/sfx/tia_laser.json
+```
+
+### `lym tia song render`
+
+Compiles a dual-channel TIA song sequence (`.json`) into an optimized `.tsg` delta binary stream with `.tsi` ca65 constants.
+
+```bash
+lym tia song render --input song.json --output song.tsg
+```
+
+### `lym tia song play`
+
+Auditions a TIA song sequence (`.tsg`, `.json`) over host speakers.
+
+```bash
+lym tia song play --input song.json
+```

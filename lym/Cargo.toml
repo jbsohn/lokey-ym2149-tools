@@ -7,6 +7,7 @@ description = "Unified CLI toolchain for compiling, auditioning, dumping, and in
 
 [dependencies]
 ym-core = { path = "../ym-core" }
+tia-core = { path = "../tia-core" }
 serde_json.workspace = true
 clap.workspace = true
 console.workspace = true

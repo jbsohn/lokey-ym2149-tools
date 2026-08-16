@@ -3,6 +3,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+use tia_core::{
+    TiaChannel, TiaFrame, TiaMixer, TiaSequence, TiaSfxRenderer, TiaSfxSequence, TiaSongRenderer,
+};
 use ym_core::{
     SfxSequence, YmChannel, YmDataRenderer, YmMixer, YmSequence, YmSfxRenderer, YmSongRenderer,
 };
@@ -70,6 +73,56 @@ pub fn spawn_key_listener() -> mpsc::Receiver<Key> {
         }
     });
     rx
+}
+
+/// Prints the keyboard trigger for YM and TIA SFX lists in a hybrid setup.
+pub fn print_hybrid_sfx_keybindings(ym_sfx: &[SfxSequence], tia_sfx: &[TiaSfxSequence]) {
+    if !ym_sfx.is_empty() {
+        println!(
+            "{}",
+            style("  --- YM-2149 Sound Effects (Overlays 3-Channel Music) ---")
+                .yellow()
+                .bold()
+        );
+        for (idx, sfx_item) in ym_sfx.iter().enumerate().take(5) {
+            let key_label = format!("{}", idx + 1);
+            println!(
+                "    [{}] Key {}: {} ({} frames)",
+                style(format!("YM-{idx}")).dim(),
+                style(key_label).yellow().bold(),
+                style(&sfx_item.name).cyan(),
+                sfx_item.frames.len()
+            );
+        }
+    }
+
+    if !tia_sfx.is_empty() {
+        println!(
+            "{}",
+            style("  --- Atari TIA Sound Effects (Independent Ch 0 & 1, Zero Voice Stealing) ---")
+                .green()
+                .bold()
+        );
+        for (idx, sfx_item) in tia_sfx.iter().enumerate().take(7) {
+            let key_label = match idx {
+                0 => "SPACE or 6".to_string(),
+                1 => "7".to_string(),
+                2 => "8".to_string(),
+                3 => "9".to_string(),
+                4 => "0".to_string(),
+                5 => "Z".to_string(),
+                6 => "X".to_string(),
+                _ => format!("{idx}"),
+            };
+            println!(
+                "    [{}] Key {}: {} ({} frames)",
+                style(format!("TIA-{idx}")).dim(),
+                style(key_label).green().bold(),
+                style(&sfx_item.name).cyan(),
+                sfx_item.frames.len()
+            );
+        }
+    }
 }
 
 /// Prints the keyboard trigger for each of the first 10 loaded SFX.
@@ -154,6 +207,117 @@ impl SampleSource for YmMixer {
 impl SampleSource for YmDataRenderer {
     fn render_samples(&mut self, data: &mut [f32], channels: usize) {
         self.render_samples(data, channels);
+    }
+}
+
+impl SampleSource for TiaSongRenderer {
+    fn render_samples(&mut self, data: &mut [f32], channels: usize) {
+        self.render_samples(data, channels);
+    }
+}
+
+impl SampleSource for TiaSfxRenderer {
+    fn render_samples(&mut self, data: &mut [f32], channels: usize) {
+        self.render_samples(data, channels);
+    }
+}
+
+impl SampleSource for TiaMixer {
+    fn render_samples(&mut self, data: &mut [f32], channels: usize) {
+        self.render_samples(data, channels);
+    }
+}
+
+/// Dual-chip hybrid mixing engine combining YM-2149 and Atari TIA real-time audio.
+pub struct HybridMixer {
+    ym_mixer: YmMixer,
+    tia_mixer: Option<TiaMixer>,
+    finished: bool,
+}
+
+impl HybridMixer {
+    #[must_use]
+    pub fn new(
+        ym_song: &YmSequence,
+        ym_sfx: &[SfxSequence],
+        tia_sfx: &[TiaSfxSequence],
+        preferred_ym_channel: YmChannel,
+        output_sample_rate: u32,
+    ) -> Self {
+        let ym_mixer = YmMixer::new(ym_song, ym_sfx, preferred_ym_channel, output_sample_rate);
+        let has_tia_sfx = !tia_sfx.is_empty();
+
+        let tia_mixer = if has_tia_sfx {
+            let dummy_tia_song = TiaSequence {
+                name: "silent_tia".to_string(),
+                timing: tia_core::TimingConfig {
+                    master_clock_hz: tia_core::TIA_NTSC_AUDIO_CLOCK,
+                    frame_rate: tia_core::SystemHz::Custom(ym_song.timing.frame_rate.hz_value()),
+                },
+                priority: 0,
+                loop_start: ym_song.loop_start,
+                frames: vec![TiaFrame::default(); ym_song.frames.len()],
+            };
+            Some(TiaMixer::new(
+                &dummy_tia_song,
+                tia_sfx,
+                TiaChannel::Ch0,
+                output_sample_rate,
+            ))
+        } else {
+            None
+        };
+
+        Self {
+            ym_mixer,
+            tia_mixer,
+            finished: false,
+        }
+    }
+
+    pub fn trigger_ym_sfx(&mut self, idx: usize) {
+        self.ym_mixer.trigger_sfx(idx);
+    }
+
+    pub fn trigger_tia_sfx(&mut self, idx: usize) {
+        if let Some(ref mut tm) = self.tia_mixer {
+            tm.trigger_sfx(idx);
+        }
+    }
+
+    #[must_use]
+    pub fn current_song_frame(&self) -> usize {
+        self.ym_mixer.current_song_frame()
+    }
+
+    pub fn seek_song(&mut self, target_frame: usize) {
+        self.ym_mixer.seek_song(target_frame);
+        if let Some(ref mut tm) = self.tia_mixer {
+            tm.seek_song(target_frame);
+        }
+    }
+
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.finished || self.ym_mixer.is_finished()
+    }
+
+    pub fn set_finished(&mut self, finished: bool) {
+        self.finished = finished;
+        self.ym_mixer.set_finished(finished);
+    }
+}
+
+impl SampleSource for HybridMixer {
+    fn render_samples(&mut self, data: &mut [f32], channels: usize) {
+        self.ym_mixer.render_samples(data, channels);
+        if let Some(ref mut tm) = self.tia_mixer {
+            let mut tia_buf = vec![0.0f32; data.len()];
+            tm.render_samples(&mut tia_buf, channels);
+            for (out, &t) in data.iter_mut().zip(&tia_buf) {
+                *out += t;
+            }
+        }
     }
 }
 
@@ -354,23 +518,200 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Auditions an interactive song and sound effect mix over system audio.
+    /// Auditions a TIA sound effect sequence over system audio.
     ///
     /// # Errors
     ///
     /// Returns an error if initializing the host audio device or stream fails.
-    pub fn play_mix(
+    pub fn play_tia_sfx(
+        sequence: &TiaSfxSequence,
+        config: &AudioConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if sequence.frames.is_empty() {
+            println!("{}", style("Sequence contains no frames to play.").yellow());
+            return Ok(());
+        }
+
+        let audio = AudioOutputSession::open(config)?;
+        let renderer = Arc::new(Mutex::new(TiaSfxRenderer::new(sequence, audio.sample_rate)));
+
+        let stream = build_f32_stream(&audio, Arc::clone(&renderer))?;
+        stream.play()?;
+
+        let total_frames = sequence.frames.len();
+        let hz = sequence.source_hz;
+        let channel = sequence.preferred_channel.unwrap_or(TiaChannel::Ch0);
+
+        println!(
+            "{} '{}' ({} frames @ {} Hz on TIA channel {:?})",
+            style("PLAYING TIA SOUND EFFECT:").bold().green(),
+            sequence.name,
+            total_frames,
+            hz,
+            channel
+        );
+
+        let interactive = Term::stdout().is_term();
+        let pb = frame_progress_bar(total_frames as u64);
+        pb.set_message(format!(" {}", style("('q' to quit)").yellow()));
+
+        let key_rx = interactive.then(spawn_key_listener);
+
+        loop {
+            if let Some(rx) = &key_rx {
+                while let Ok(key) = rx.try_recv() {
+                    if matches!(key, Key::Char('q' | 'Q')) {
+                        let mut r = renderer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        r.set_finished(true);
+                    }
+                }
+            }
+
+            let (current, is_done) = {
+                let r = renderer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (r.current_frame(), r.is_finished())
+            };
+
+            pb.set_position(current.min(total_frames) as u64);
+            if is_done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pb.finish_and_clear();
+
+        if key_rx.is_some() {
+            let _ = std::process::Command::new("stty").arg("sane").status();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(())
+    }
+
+    /// Auditions a TIA song sequence over system audio.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initializing the host audio device or stream fails.
+    pub fn play_tia_song(
+        sequence: &TiaSequence,
+        config: &AudioConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if sequence.frames.is_empty() {
+            println!("{}", style("Sequence contains no frames to play.").yellow());
+            return Ok(());
+        }
+
+        let audio = AudioOutputSession::open(config)?;
+        let renderer = Arc::new(Mutex::new(TiaSongRenderer::new(
+            sequence,
+            audio.sample_rate,
+        )));
+
+        let stream = build_f32_stream(&audio, Arc::clone(&renderer))?;
+        stream.play()?;
+
+        let total_frames = sequence.frames.len();
+        let hz = sequence.timing.frame_rate.hz_value();
+
+        println!(
+            "{} '{}' ({} frames @ {} Hz)",
+            style("PLAYING TIA SONG:").bold().green(),
+            sequence.name,
+            total_frames,
+            hz
+        );
+
+        let interactive = Term::stdout().is_term();
+        let pb = frame_progress_bar(total_frames as u64);
+        pb.set_message(format!(
+            " {}",
+            style("(\u{2190}/\u{2192} to seek, 'q' to quit)").yellow()
+        ));
+
+        let key_rx = interactive.then(spawn_key_listener);
+        let seek_step_frames = ((hz as usize) * 5).max(1);
+
+        loop {
+            if let Some(rx) = &key_rx {
+                while let Ok(key) = rx.try_recv() {
+                    match key {
+                        Key::ArrowRight => {
+                            let mut r = renderer
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let target = r.current_frame().saturating_add(seek_step_frames);
+                            r.seek(target);
+                        }
+                        Key::ArrowLeft => {
+                            let mut r = renderer
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let target = r.current_frame().saturating_sub(seek_step_frames);
+                            r.seek(target);
+                        }
+                        Key::Char('q' | 'Q') => {
+                            let mut r = renderer
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            r.set_finished(true);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let (current, is_done) = {
+                let r = renderer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (r.current_frame(), r.is_finished())
+            };
+
+            pb.set_position(current.min(total_frames) as u64);
+            if is_done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pb.finish_and_clear();
+
+        if key_rx.is_some() {
+            let _ = std::process::Command::new("stty").arg("sane").status();
+        }
+        if sequence.loop_start.is_none() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    }
+
+    /// Auditions an interactive song and sound effect mix over system audio (supports YM2149 + TIA hybrid mixing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initializing the host audio device or stream fails.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::missing_panics_doc,
+        clippy::match_same_arms
+    )]
+    pub fn play_hybrid_mix(
         song_seq: &YmSequence,
-        sfx_list: &[SfxSequence],
+        ym_sfx_list: &[SfxSequence],
+        tia_sfx_list: &[TiaSfxSequence],
         preferred_channel: YmChannel,
         config: &AudioConfig,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        print_sfx_keybindings(sfx_list);
+        print_hybrid_sfx_keybindings(ym_sfx_list, tia_sfx_list);
 
         let audio = AudioOutputSession::open(config)?;
-        let mixer = Arc::new(Mutex::new(YmMixer::new(
+        let mixer = Arc::new(Mutex::new(HybridMixer::new(
             song_seq,
-            sfx_list,
+            ym_sfx_list,
+            tia_sfx_list,
             preferred_channel,
             audio.sample_rate,
         )));
@@ -389,9 +730,18 @@ impl AudioPlayer {
             .progress_chars("=>-"),
         );
 
-        pb.set_message(format!(
-            " Press \u{2190}/\u{2192} to seek, 1-9/0/SPACE to trigger SFX, 'q' to quit (Primary Ch: {preferred_channel:?})"
-        ));
+        let has_tia = !tia_sfx_list.is_empty();
+        let has_ym = !ym_sfx_list.is_empty();
+
+        let mode_msg = if has_tia && has_ym {
+            "Keys 1-5: YM SFX | Keys 6-0/SPACE/Z/X: TIA SFX | \u{2190}/\u{2192}: Seek | 'q': Quit"
+        } else if has_tia {
+            "Keys 1-9/0/SPACE/Z/X: TIA SFX | \u{2190}/\u{2192}: Seek | 'q': Quit"
+        } else {
+            "Keys 1-9/0/SPACE: YM SFX | \u{2190}/\u{2192}: Seek | 'q': Quit"
+        };
+
+        pb.set_message(format!(" {mode_msg}"));
 
         let key_rx = spawn_key_listener();
         let seek_step_frames = ((song_hz as usize) * 5).max(1);
@@ -421,11 +771,46 @@ impl AudioPlayer {
                     m.seek_song(target);
                 }
 
-                if let Some(sfx_idx) = key_to_sfx_index(&key) {
-                    let mut m = mixer
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    m.trigger_sfx(sfx_idx);
+                if has_tia && has_ym {
+                    // Both YM and TIA SFX loaded:
+                    // Keys 1..=5 -> YM SFX 0..=4
+                    // Keys 6..=0 -> TIA SFX 0..=4
+                    // Space -> TIA SFX 0
+                    // Z/z -> TIA SFX 5, X/x -> TIA SFX 6
+                    match key {
+                        Key::Char('1') => mixer.lock().unwrap().trigger_ym_sfx(0),
+                        Key::Char('2') => mixer.lock().unwrap().trigger_ym_sfx(1),
+                        Key::Char('3') => mixer.lock().unwrap().trigger_ym_sfx(2),
+                        Key::Char('4') => mixer.lock().unwrap().trigger_ym_sfx(3),
+                        Key::Char('5') => mixer.lock().unwrap().trigger_ym_sfx(4),
+                        Key::Char(' ' | '6') => mixer.lock().unwrap().trigger_tia_sfx(0),
+                        Key::Char('7') => mixer.lock().unwrap().trigger_tia_sfx(1),
+                        Key::Char('8') => mixer.lock().unwrap().trigger_tia_sfx(2),
+                        Key::Char('9') => mixer.lock().unwrap().trigger_tia_sfx(3),
+                        Key::Char('0') => mixer.lock().unwrap().trigger_tia_sfx(4),
+                        Key::Char('z' | 'Z') => mixer.lock().unwrap().trigger_tia_sfx(5),
+                        Key::Char('x' | 'X') => mixer.lock().unwrap().trigger_tia_sfx(6),
+                        _ => {}
+                    }
+                } else if has_tia {
+                    // Only TIA SFX loaded:
+                    match key {
+                        Key::Char(' ' | '1') => mixer.lock().unwrap().trigger_tia_sfx(0),
+                        Key::Char('2') => mixer.lock().unwrap().trigger_tia_sfx(1),
+                        Key::Char('3') => mixer.lock().unwrap().trigger_tia_sfx(2),
+                        Key::Char('4') => mixer.lock().unwrap().trigger_tia_sfx(3),
+                        Key::Char('5') => mixer.lock().unwrap().trigger_tia_sfx(4),
+                        Key::Char('6') => mixer.lock().unwrap().trigger_tia_sfx(5),
+                        Key::Char('7') => mixer.lock().unwrap().trigger_tia_sfx(6),
+                        Key::Char('8') => mixer.lock().unwrap().trigger_tia_sfx(7),
+                        Key::Char('9') => mixer.lock().unwrap().trigger_tia_sfx(8),
+                        Key::Char('0') => mixer.lock().unwrap().trigger_tia_sfx(9),
+                        Key::Char('z' | 'Z') => mixer.lock().unwrap().trigger_tia_sfx(0),
+                        Key::Char('x' | 'X') => mixer.lock().unwrap().trigger_tia_sfx(1),
+                        _ => {}
+                    }
+                } else if let Some(sfx_idx) = key_to_sfx_index(&key) {
+                    mixer.lock().unwrap().trigger_ym_sfx(sfx_idx);
                 }
             }
 

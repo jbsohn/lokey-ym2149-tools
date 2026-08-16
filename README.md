@@ -9,11 +9,13 @@ workstation before flashing a single byte to retro console hardware. Ingest mult
 `.csv`, `.afx`, `.afb`), compress 16-bit Atari ST `.ym` tracks into low-CPU-overhead `.ysg` streams, and interactively
 mix music and SFX with real-time keyboard controls—all before touching target 6502 assembly code.
 
-## Crates in the Workspace
+## Crates & Modules in the Workspace
 
 - **`ym-core`**: The foundational library containing the platform-agnostic `DeltaCompiler`, YM register configurations,
   frame structures, format decoders, and the real-time audio playback engine.
-- **`lym`**: The unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs
+- **`tia-core`**: Dedicated Rust library for Atari TIA (Television Interface Adapter) sound chip emulation, dual-channel
+  sequence authoring, delta compression, and real-time interactive SFX/music playback and mixing.
+- **`lym`**: The unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 and TIA music
   and sound effects.
 - **`a78tool`**: Atari 7800 `.a78` ROM header utility
   (see [lokey-7800-tools](file:///home/john/Projects/lokey-7800-tools)).
@@ -156,6 +158,10 @@ low-level emulation and chiptune parsing:
 
 We extend our deep gratitude to the authors of these crates for providing the cycle-accurate emulation engine that
 powers the real-time auditioning tools in this codebase.
+
+### Atari TIA Emulation & Algorithms
+
+The TIA sound engine in **`tia-core`** was adapted and developed from the open-source **[`TIASound`](https://github.com/fabiopiratininga/TIASound)** emulator created by [Fabio Cardoso](https://github.com/fabiopiratininga) (`fabiopiratininga`), which provided the foundational JavaScript reference for the TIA LFSR polynomial generators and audio worklet synthesis models.
 
 ---
 
