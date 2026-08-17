@@ -1,0 +1,19 @@
+{
+  "name": "star_raiders_laser",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 15,
+  "preferredChannel": "0",
+  "loopStart": null,
+  "frames": [
+    { "audf": 2, "audc": 12, "audv": 15, "duration": 1 },
+    { "audf": 3, "audc": 12, "audv": 15, "duration": 1 },
+    { "audf": 5, "audc": 12, "audv": 14, "duration": 1 },
+    { "audf": 7, "audc": 12, "audv": 13, "duration": 1 },
+    { "audf": 10, "audc": 12, "audv": 12, "duration": 1 },
+    { "audf": 14, "audc": 12, "audv": 10, "duration": 1 },
+    { "audf": 19, "audc": 12, "audv": 8, "duration": 1 },
+    { "audf": 24, "audc": 12, "audv": 5, "duration": 1 },
+    { "audf": 29, "audc": 12, "audv": 2, "duration": 1 }
+  ]
+}

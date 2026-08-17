@@ -1,0 +1,13 @@
+{
+  "name": "tia_slocum_kick",
+  "timing": "ntsc",
+  "priority": 1,
+  "frames": [
+    { "audf": 30, "audc": "buzz", "audv": 15 },
+    { "audf": 30, "audc": "buzz", "audv": 14 },
+    { "audf": 30, "audc": "buzz", "audv": 12 },
+    { "audf": 30, "audc": "buzz", "audv": 8 },
+    { "audf": 30, "audc": "buzz", "audv": 4 },
+    { "audf": 0,  "audc": 0,      "audv": 0 }
+  ]
+}

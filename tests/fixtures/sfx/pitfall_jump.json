@@ -1,0 +1,16 @@
+{
+  "name": "pitfall_jump",
+  "timing": "ntsc",
+  "priority": 2,
+  "frames": [
+    { "audf": 26, "audc": "pitfall", "audv": 12 },
+    { "audf": 22, "audc": "pitfall", "audv": 12 },
+    { "audf": 18, "audc": "pitfall", "audv": 12 },
+    { "audf": 14, "audc": "pitfall", "audv": 12 },
+    { "audf": 10, "audc": "pitfall", "audv": 10 },
+    { "audf": 6,  "audc": "pitfall", "audv": 8 },
+    { "audf": 3,  "audc": "pitfall", "audv": 6 },
+    { "audf": 1,  "audc": "pitfall", "audv": 3 },
+    { "audf": 0,  "audc": 0,         "audv": 0 }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "tia_coin",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 12,
+  "preferredChannel": "0",
+  "loopStart": null,
+  "frames": [
+    { "audf": 6, "audc": "square", "audv": 12, "duration": 2 },
+    { "audf": 6, "audc": "square", "audv": 10, "duration": 2 },
+    { "audf": 3, "audc": "square", "audv": 14, "duration": 3 },
+    { "audf": 3, "audc": "square", "audv": 11, "duration": 3 },
+    { "audf": 3, "audc": "square", "audv": 7,  "duration": 3 },
+    { "audf": 3, "audc": "square", "audv": 3,  "duration": 2 }
+  ]
+}

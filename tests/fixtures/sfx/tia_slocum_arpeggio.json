@@ -1,0 +1,17 @@
+{
+  "name": "tia_slocum_arpeggio",
+  "timing": "ntsc",
+  "priority": 2,
+  "frames": [
+    { "audf": 28, "audc": "square", "audv": 12 },
+    { "audf": 28, "audc": "square", "audv": 12 },
+    { "audf": 22, "audc": "square", "audv": 12 },
+    { "audf": 22, "audc": "square", "audv": 12 },
+    { "audf": 12, "audc": "lead",   "audv": 12 },
+    { "audf": 12, "audc": "lead",   "audv": 12 },
+    { "audf": 10, "audc": "square", "audv": 10 },
+    { "audf": 10, "audc": "square", "audv": 8 },
+    { "audf": 10, "audc": "square", "audv": 4 },
+    { "audf": 0,  "audc": 0,        "audv": 0 }
+  ]
+}

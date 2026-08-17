@@ -1,0 +1,13 @@
+{
+  "name": "pitfall_rolling_log",
+  "timing": "ntsc",
+  "priority": 1,
+  "frames": [
+    { "audf": 28, "audc": "pitfall", "audv": 6 },
+    { "audf": 28, "audc": "pitfall", "audv": 10 },
+    { "audf": 28, "audc": "pitfall", "audv": 12 },
+    { "audf": 28, "audc": "pitfall", "audv": 9 },
+    { "audf": 28, "audc": "pitfall", "audv": 5 },
+    { "audf": 28, "audc": "pitfall", "audv": 0 }
+  ]
+}

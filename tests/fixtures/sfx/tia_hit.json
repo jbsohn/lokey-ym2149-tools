@@ -1,0 +1,16 @@
+{
+  "name": "tia_hit",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 18,
+  "preferredChannel": "1",
+  "loopStart": null,
+  "frames": [
+    { "audf": 4,  "audc": "noise", "audv": 15, "duration": 1 },
+    { "audf": 8,  "audc": "noise", "audv": 14, "duration": 1 },
+    { "audf": 14, "audc": "engine", "audv": 12, "duration": 1 },
+    { "audf": 20, "audc": "engine", "audv": 9,  "duration": 1 },
+    { "audf": 26, "audc": "engine", "audv": 5,  "duration": 1 },
+    { "audf": 30, "audc": "engine", "audv": 2,  "duration": 1 }
+  ]
+}

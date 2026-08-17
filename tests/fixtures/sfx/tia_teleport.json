@@ -1,0 +1,21 @@
+{
+  "name": "tia_teleport",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 14,
+  "preferredChannel": "0",
+  "loopStart": null,
+  "frames": [
+    { "audf": 28, "audc": "buzz", "audv": 10, "duration": 1 },
+    { "audf": 22, "audc": "buzz", "audv": 12, "duration": 1 },
+    { "audf": 16, "audc": "buzz", "audv": 13, "duration": 1 },
+    { "audf": 11, "audc": "buzz", "audv": 14, "duration": 1 },
+    { "audf": 7,  "audc": "buzz", "audv": 15, "duration": 1 },
+    { "audf": 4,  "audc": "buzz", "audv": 15, "duration": 1 },
+    { "audf": 2,  "audc": "buzz", "audv": 14, "duration": 1 },
+    { "audf": 5,  "audc": "buzz", "audv": 12, "duration": 1 },
+    { "audf": 10, "audc": "buzz", "audv": 10, "duration": 1 },
+    { "audf": 18, "audc": "buzz", "audv": 7,  "duration": 1 },
+    { "audf": 26, "audc": "buzz", "audv": 4,  "duration": 1 }
+  ]
+}

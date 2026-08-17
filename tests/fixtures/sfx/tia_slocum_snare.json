@@ -1,0 +1,12 @@
+{
+  "name": "tia_slocum_snare",
+  "timing": "ntsc",
+  "priority": 1,
+  "frames": [
+    { "audf": 8, "audc": "noise", "audv": 15 },
+    { "audf": 8, "audc": "noise", "audv": 12 },
+    { "audf": 8, "audc": "noise", "audv": 8 },
+    { "audf": 8, "audc": "noise", "audv": 4 },
+    { "audf": 0, "audc": 0,       "audv": 0 }
+  ]
+}

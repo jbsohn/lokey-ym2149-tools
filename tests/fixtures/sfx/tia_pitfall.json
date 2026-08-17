@@ -1,0 +1,18 @@
+{
+  "name": "tia_pitfall",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 15,
+  "preferredChannel": "0",
+  "loopStart": null,
+  "frames": [
+    { "audf": 8, "audc": 7, "audv": 12, "duration": 1 },
+    { "audf": 10, "audc": 7, "audv": 12, "duration": 1 },
+    { "audf": 12, "audc": 7, "audv": 11, "duration": 1 },
+    { "audf": 15, "audc": 7, "audv": 11, "duration": 1 },
+    { "audf": 18, "audc": 7, "audv": 10, "duration": 1 },
+    { "audf": 22, "audc": 7, "audv": 9, "duration": 1 },
+    { "audf": 26, "audc": 7, "audv": 8, "duration": 1 },
+    { "audf": 30, "audc": 7, "audv": 6, "duration": 1 }
+  ]
+}

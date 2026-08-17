@@ -1,0 +1,15 @@
+{
+  "name": "tia_engine_rumble",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 8,
+  "preferredChannel": "1",
+  "loopStart": 0,
+  "frames": [
+    { "audf": 22, "audc": "engine", "audv": 10, "duration": 2 },
+    { "audf": 24, "audc": "engine", "audv": 11, "duration": 2 },
+    { "audf": 26, "audc": "engine", "audv": 12, "duration": 2 },
+    { "audf": 25, "audc": "engine", "audv": 11, "duration": 2 },
+    { "audf": 23, "audc": "engine", "audv": 10, "duration": 2 }
+  ]
+}

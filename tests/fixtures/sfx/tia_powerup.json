@@ -1,0 +1,18 @@
+{
+  "name": "tia_powerup",
+  "sourceClock": 31440,
+  "sourceHz": 60,
+  "priority": 16,
+  "preferredChannel": "0",
+  "loopStart": null,
+  "frames": [
+    { "audf": 18, "audc": "lead", "audv": 12, "duration": 2 },
+    { "audf": 14, "audc": "lead", "audv": 13, "duration": 2 },
+    { "audf": 10, "audc": "lead", "audv": 14, "duration": 2 },
+    { "audf": 7,  "audc": "lead", "audv": 15, "duration": 2 },
+    { "audf": 4,  "audc": "lead", "audv": 15, "duration": 3 },
+    { "audf": 2,  "audc": "lead", "audv": 14, "duration": 4 },
+    { "audf": 2,  "audc": "lead", "audv": 10, "duration": 2 },
+    { "audf": 2,  "audc": "lead", "audv": 5,  "duration": 2 }
+  ]
+}
