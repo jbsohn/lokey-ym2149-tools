@@ -103,12 +103,14 @@ impl DeltaCompiler {
         }
 
         let candidate_sizes: &[usize] = match level {
-            CompressionLevel::None | CompressionLevel::DeltaOnly => &[sequence.frames.len().max(1)],
+            CompressionLevel::None | CompressionLevel::DeltaOnly => {
+                &[sequence.frames.len().clamp(1, 255)]
+            }
             CompressionLevel::Full => {
                 if options.dedup {
                     &[16, 32, 64]
                 } else {
-                    &[sequence.frames.len().max(1)]
+                    &[sequence.frames.len().clamp(1, 255)]
                 }
             }
         };

@@ -3,7 +3,7 @@
 
 BUILD_DIR    := build
 LYM          ?= ../../../target/release/lym
-A78TOOL      ?= $(shell which a78tool 2>/dev/null || find /home/john/Projects/lokey-7800-tools/target/release/a78tool /home/john/Projects/lokey-7800-tools/target/debug/a78tool 2>/dev/null | head -n 1 || echo a78tool)
+A78TOOL      := a78tool
 CA65         := ca65
 LD65         := ld65
 SIGN         := 7800sign

@@ -380,6 +380,7 @@ impl TiaMixer {
                             frame.apply_to_chip(&mut self.chip, TiaChannel::from_index(ch_idx));
                             active.current_idx += 1;
                         } else {
+                            self.chip.set_audv(TiaChannel::from_index(ch_idx), 0);
                             self.active_sfx[ch_idx] = None;
                         }
                     }

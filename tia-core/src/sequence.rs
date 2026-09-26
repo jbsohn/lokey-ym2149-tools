@@ -276,10 +276,12 @@ impl TiaSequence {
                 }
                 let rle_count = bytes[idx] as usize;
                 idx += 1;
-                let last: TiaFrame = frames.last().cloned().unwrap_or_default();
+                // Held/sustained frames: emit no-op frames so playback doesn't
+                // re-apply the establishing frame's register writes, which would
+                // reset the LFSR phase on every repeated frame (audible click).
                 for _ in 0..rle_count {
                     if frames.len() < expected_frames {
-                        frames.push(last.clone());
+                        frames.push(TiaFrame::default());
                     }
                 }
                 continue;

@@ -103,16 +103,27 @@ pub fn print_hybrid_sfx_keybindings(ym_sfx: &[SfxSequence], tia_sfx: &[TiaSfxSeq
                 .green()
                 .bold()
         );
-        for (idx, sfx_item) in tia_sfx.iter().enumerate().take(7) {
-            let key_label = match idx {
-                0 => "SPACE or 6".to_string(),
-                1 => "7".to_string(),
-                2 => "8".to_string(),
-                3 => "9".to_string(),
-                4 => "0".to_string(),
-                5 => "Z".to_string(),
-                6 => "X".to_string(),
-                _ => format!("{idx}"),
+        let both_loaded = !ym_sfx.is_empty();
+        let take_n = if both_loaded { 7 } else { 10 };
+        for (idx, sfx_item) in tia_sfx.iter().enumerate().take(take_n) {
+            let key_label = if both_loaded {
+                match idx {
+                    0 => "SPACE or 6".to_string(),
+                    1 => "7".to_string(),
+                    2 => "8".to_string(),
+                    3 => "9".to_string(),
+                    4 => "0".to_string(),
+                    5 => "Z".to_string(),
+                    6 => "X".to_string(),
+                    _ => format!("{idx}"),
+                }
+            } else {
+                match idx {
+                    0 => "SPACE or 1".to_string(),
+                    1..=8 => format!("{}", idx + 1),
+                    9 => "0".to_string(),
+                    _ => format!("{idx}"),
+                }
             };
             println!(
                 "    [{}] Key {}: {} ({} frames)",
@@ -233,6 +244,7 @@ pub struct HybridMixer {
     ym_mixer: YmMixer,
     tia_mixer: Option<TiaMixer>,
     finished: bool,
+    tia_scratch: Vec<f32>,
 }
 
 impl HybridMixer {
@@ -272,6 +284,7 @@ impl HybridMixer {
             ym_mixer,
             tia_mixer,
             finished: false,
+            tia_scratch: Vec::new(),
         }
     }
 
@@ -312,9 +325,12 @@ impl SampleSource for HybridMixer {
     fn render_samples(&mut self, data: &mut [f32], channels: usize) {
         self.ym_mixer.render_samples(data, channels);
         if let Some(ref mut tm) = self.tia_mixer {
-            let mut tia_buf = vec![0.0f32; data.len()];
-            tm.render_samples(&mut tia_buf, channels);
-            for (out, &t) in data.iter_mut().zip(&tia_buf) {
+            if self.tia_scratch.len() < data.len() {
+                self.tia_scratch.resize(data.len(), 0.0);
+            }
+            let scratch = &mut self.tia_scratch[..data.len()];
+            tm.render_samples(scratch, channels);
+            for (out, &t) in data.iter_mut().zip(scratch.iter()) {
                 *out += t;
             }
         }
@@ -777,40 +793,53 @@ impl AudioPlayer {
                     // Keys 6..=0 -> TIA SFX 0..=4
                     // Space -> TIA SFX 0
                     // Z/z -> TIA SFX 5, X/x -> TIA SFX 6
+                    let lock = || {
+                        mixer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    };
                     match key {
-                        Key::Char('1') => mixer.lock().unwrap().trigger_ym_sfx(0),
-                        Key::Char('2') => mixer.lock().unwrap().trigger_ym_sfx(1),
-                        Key::Char('3') => mixer.lock().unwrap().trigger_ym_sfx(2),
-                        Key::Char('4') => mixer.lock().unwrap().trigger_ym_sfx(3),
-                        Key::Char('5') => mixer.lock().unwrap().trigger_ym_sfx(4),
-                        Key::Char(' ' | '6') => mixer.lock().unwrap().trigger_tia_sfx(0),
-                        Key::Char('7') => mixer.lock().unwrap().trigger_tia_sfx(1),
-                        Key::Char('8') => mixer.lock().unwrap().trigger_tia_sfx(2),
-                        Key::Char('9') => mixer.lock().unwrap().trigger_tia_sfx(3),
-                        Key::Char('0') => mixer.lock().unwrap().trigger_tia_sfx(4),
-                        Key::Char('z' | 'Z') => mixer.lock().unwrap().trigger_tia_sfx(5),
-                        Key::Char('x' | 'X') => mixer.lock().unwrap().trigger_tia_sfx(6),
+                        Key::Char('1') => lock().trigger_ym_sfx(0),
+                        Key::Char('2') => lock().trigger_ym_sfx(1),
+                        Key::Char('3') => lock().trigger_ym_sfx(2),
+                        Key::Char('4') => lock().trigger_ym_sfx(3),
+                        Key::Char('5') => lock().trigger_ym_sfx(4),
+                        Key::Char(' ' | '6') => lock().trigger_tia_sfx(0),
+                        Key::Char('7') => lock().trigger_tia_sfx(1),
+                        Key::Char('8') => lock().trigger_tia_sfx(2),
+                        Key::Char('9') => lock().trigger_tia_sfx(3),
+                        Key::Char('0') => lock().trigger_tia_sfx(4),
+                        Key::Char('z' | 'Z') => lock().trigger_tia_sfx(5),
+                        Key::Char('x' | 'X') => lock().trigger_tia_sfx(6),
                         _ => {}
                     }
                 } else if has_tia {
                     // Only TIA SFX loaded:
+                    let lock = || {
+                        mixer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    };
                     match key {
-                        Key::Char(' ' | '1') => mixer.lock().unwrap().trigger_tia_sfx(0),
-                        Key::Char('2') => mixer.lock().unwrap().trigger_tia_sfx(1),
-                        Key::Char('3') => mixer.lock().unwrap().trigger_tia_sfx(2),
-                        Key::Char('4') => mixer.lock().unwrap().trigger_tia_sfx(3),
-                        Key::Char('5') => mixer.lock().unwrap().trigger_tia_sfx(4),
-                        Key::Char('6') => mixer.lock().unwrap().trigger_tia_sfx(5),
-                        Key::Char('7') => mixer.lock().unwrap().trigger_tia_sfx(6),
-                        Key::Char('8') => mixer.lock().unwrap().trigger_tia_sfx(7),
-                        Key::Char('9') => mixer.lock().unwrap().trigger_tia_sfx(8),
-                        Key::Char('0') => mixer.lock().unwrap().trigger_tia_sfx(9),
-                        Key::Char('z' | 'Z') => mixer.lock().unwrap().trigger_tia_sfx(0),
-                        Key::Char('x' | 'X') => mixer.lock().unwrap().trigger_tia_sfx(1),
+                        Key::Char(' ' | '1') => lock().trigger_tia_sfx(0),
+                        Key::Char('2') => lock().trigger_tia_sfx(1),
+                        Key::Char('3') => lock().trigger_tia_sfx(2),
+                        Key::Char('4') => lock().trigger_tia_sfx(3),
+                        Key::Char('5') => lock().trigger_tia_sfx(4),
+                        Key::Char('6') => lock().trigger_tia_sfx(5),
+                        Key::Char('7') => lock().trigger_tia_sfx(6),
+                        Key::Char('8') => lock().trigger_tia_sfx(7),
+                        Key::Char('9') => lock().trigger_tia_sfx(8),
+                        Key::Char('0') => lock().trigger_tia_sfx(9),
+                        Key::Char('z' | 'Z') => lock().trigger_tia_sfx(0),
+                        Key::Char('x' | 'X') => lock().trigger_tia_sfx(1),
                         _ => {}
                     }
                 } else if let Some(sfx_idx) = key_to_sfx_index(&key) {
-                    mixer.lock().unwrap().trigger_ym_sfx(sfx_idx);
+                    mixer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .trigger_ym_sfx(sfx_idx);
                 }
             }
 
