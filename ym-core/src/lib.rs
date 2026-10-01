@@ -295,4 +295,23 @@ mod tests {
         renderer.render_samples(&mut buf, 2);
         assert!(buf.iter().any(|&s| s != 0.0));
     }
+
+    #[test]
+    fn test_ym6_nd_loader_import_preserves_channels() {
+        let bytes = std::fs::read("../tests/fixtures/song/ND-Loader.ym")
+            .or_else(|_| std::fs::read("tests/fixtures/song/ND-Loader.ym"))
+            .expect("Failed to read ND-Loader.ym");
+        let (seq, digidrum_frames) =
+            YmSequence::from_ym_data("ND-Loader", &bytes, None, None).unwrap();
+        assert_eq!(digidrum_frames, 0, "ND-Loader has 0 digidrum samples");
+        assert_eq!(seq.frames.len(), 515);
+
+        // Frame 2 is the first playing frame: Channel A must retain envelope mode (0x1E = 30)
+        // rather than being muted to volume 0 by false digidrum detection.
+        assert_eq!(seq.frames[2].volume_a, Some(30));
+        assert_eq!(seq.frames[2].volume_b, Some(12));
+        assert_eq!(seq.frames[2].volume_c, Some(10));
+        assert_eq!(seq.frames[2].envelope_shape, Some(14));
+        assert_eq!(seq.timing.frame_rate.hz_value(), 50);
+    }
 }

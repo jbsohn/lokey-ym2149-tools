@@ -254,29 +254,20 @@ impl YmSequence {
         Ok(frames)
     }
 
-    /// Sanitizes a 16-byte raw YM frame into 14 hardware registers, stripping unused bits
-    /// and detecting YM6 digi-drum sample values. Returns the register array and whether
-    /// any digi-drum data was found and silenced.
-    fn sanitize_raw_frame(raw: &[u8; 16]) -> ([u8; 14], bool) {
+    /// Sanitizes a 16-byte raw YM frame into 14 hardware registers, stripping unused
+    /// and special-effects metadata bits (such as Atari ST MFP timer prescalers in
+    /// R6/R8, and effect codes in R1/R3).
+    fn sanitize_raw_frame(raw: &[u8; 16]) -> [u8; 14] {
         let mut reg_14 = [0u8; 14];
         reg_14.copy_from_slice(&raw[0..14]);
-        reg_14[1] &= 0x0F; // R1 bits 4-7 unused
-        reg_14[3] &= 0x0F; // R3 bits 4-7 unused
+        reg_14[1] &= 0x0F; // R1 bits 4-7: Slot 1 effect code
+        reg_14[3] &= 0x0F; // R3 bits 4-7: Slot 2 effect code
         reg_14[5] &= 0x0F; // R5 bits 4-7 unused
-                           // YM6 digi-drum frames store PCM sample values (0-255) in R8-R10 rather than
-                           // hardware volume values (0-31). Bits 5-7 set is physically impossible on the
-                           // chip — silence those channels to prevent false envelope-mode triggering.
-        let has_digidrum = reg_14[8] > 0x1F || reg_14[9] > 0x1F || reg_14[10] > 0x1F;
-        if reg_14[8] > 0x1F {
-            reg_14[8] = 0;
-        }
-        if reg_14[9] > 0x1F {
-            reg_14[9] = 0;
-        }
-        if reg_14[10] > 0x1F {
-            reg_14[10] = 0;
-        }
-        (reg_14, has_digidrum)
+        reg_14[6] &= 0x1F; // R6 bits 5-7: Slot 1 timer predivider
+        reg_14[8] &= 0x1F; // R8 bits 5-7: Slot 2 timer predivider (preserves vol & env mode)
+        reg_14[9] &= 0x1F; // R9 bits 5-7 unused
+        reg_14[10] &= 0x1F; // R10 bits 5-7 unused
+        reg_14
     }
 
     /// Converts 14 YM-2149 hardware registers to a `YmFrame`.
@@ -313,8 +304,8 @@ impl YmSequence {
     }
 
     /// Decodes raw .ym chiptune data into a `YmSequence`.
-    /// Returns the sequence and the number of frames where digi-drum sample values
-    /// were detected and silenced (YM6 only). Callers should warn the user when > 0.
+    /// Returns the sequence and the number of frames where digi-drum sample triggers
+    /// were detected and dropped (YM5/YM6 with embedded PCM samples only).
     ///
     /// `target_clock_override` selects the chip clock the output is scaled for
     /// (default: `ATARI_7800_CLOCK`, 1.789773 MHz). Pass `ATARI_ST_CLOCK`
@@ -359,7 +350,7 @@ impl YmSequence {
                     for r in 0..14 {
                         raw16[r] = data[r * frame_count + f];
                     }
-                    let (reg_14, _) = Self::sanitize_raw_frame(&raw16);
+                    let reg_14 = Self::sanitize_raw_frame(&raw16);
                     let mut frame = Self::registers_to_frame(&reg_14);
                     if apply_scaling {
                         frame.scale_pitch(ratio);
@@ -390,18 +381,21 @@ impl YmSequence {
             .loop_frame()
             .filter(|&frame| frame < total_frames);
 
-        let raw_frames = Self::parse_raw_frames(&decompressed)
+        let frame_rate_val = player.metadata().frame_rate();
+        let frame_rate = match frame_rate_val {
+            50 => SystemHz::Hz50,
+            60 => SystemHz::Hz60,
+            other => SystemHz::Custom(other),
+        };
+
+        let (raw_frames, digidrum_frames) = Self::parse_raw_frames_and_drums(&decompressed)
             .ok_or("Unsupported YM format: only YM4/YM5/YM6 are supported")?;
 
-        let mut digidrum_frames = 0usize;
         let frames = raw_frames
             .into_iter()
             .take(total_frames)
             .map(|raw| {
-                let (reg_14, has_digidrum) = Self::sanitize_raw_frame(&raw);
-                if has_digidrum {
-                    digidrum_frames += 1;
-                }
+                let reg_14 = Self::sanitize_raw_frame(&raw);
                 let mut frame = Self::registers_to_frame(&reg_14);
                 frame.envelope_shape = if raw[13] == 0xFF {
                     None
@@ -420,7 +414,7 @@ impl YmSequence {
                 name: name.to_string(),
                 timing: TimingConfig {
                     master_clock_hz: target_clock,
-                    frame_rate: SystemHz::Hz50,
+                    frame_rate,
                 },
                 priority: 0,
                 loop_start,
@@ -451,16 +445,40 @@ impl YmSequence {
         }
     }
 
-    fn parse_raw_frames(decompressed: &[u8]) -> Option<Vec<[u8; 16]>> {
+    fn parse_raw_frames_and_drums(decompressed: &[u8]) -> Option<(Vec<[u8; 16]>, usize)> {
         use ym2149_ym_replayer::parser::{Ym6Parser, YmParser};
 
-        if let Ok((frames, _)) = YmParser::new().parse_full(decompressed) {
-            return Some(frames);
+        if let Ok((frames, _, _, digidrums)) = (Ym6Parser {}).parse_full(decompressed) {
+            let mut digidrum_frames = 0;
+            if !digidrums.is_empty() {
+                for f in &frames {
+                    let code1 = (f[1] >> 4) & 0x0F;
+                    let code2 = (f[3] >> 4) & 0x0F;
+                    if (0x5..=0x7).contains(&code1) || (0x5..=0x7).contains(&code2) {
+                        digidrum_frames += 1;
+                    }
+                }
+            }
+            return Some((frames, digidrum_frames));
         }
 
-        let ym6 = Ym6Parser {};
-        if let Ok((frames, _, _, _)) = ym6.parse_full(decompressed) {
-            return Some(frames);
+        if let Ok((frames, _, _, digidrums)) =
+            YmParser::new().parse_ym5_full_with_digidrums(decompressed)
+        {
+            let mut digidrum_frames = 0;
+            if !digidrums.is_empty() {
+                for f in &frames {
+                    let code = (f[3] >> 4) & 0x03;
+                    if code != 0 {
+                        digidrum_frames += 1;
+                    }
+                }
+            }
+            return Some((frames, digidrum_frames));
+        }
+
+        if let Ok((frames, _)) = YmParser::new().parse_full(decompressed) {
+            return Some((frames, 0));
         }
 
         None
