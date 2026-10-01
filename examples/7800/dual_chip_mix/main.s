@@ -268,6 +268,8 @@ update_tia_sfx:
         ; --- Process TIA Channel 0 ---
         lda SFX0_ACTIVE
         beq @check_ch1
+        cmp #2
+        beq @sfx0_finish
 
         ldy #0
         lda (SFX0_PTR_L),y      ; Byte 0: AUDF0 (Frequency)
@@ -290,7 +292,13 @@ update_tia_sfx:
         dec SFX0_FRAMES
         bne @check_ch1
 
-        ; Effect finished: silence channel
+        ; Last frame just played in full; silence on the next tick
+        ; instead of clobbering the volume we just wrote.
+        lda #2
+        sta SFX0_ACTIVE
+        jmp @check_ch1
+
+@sfx0_finish:
         lda #0
         sta AUDV0
         sta SFX0_ACTIVE
@@ -299,6 +307,8 @@ update_tia_sfx:
         ; --- Process TIA Channel 1 ---
         lda SFX1_ACTIVE
         beq @tia_done
+        cmp #2
+        beq @sfx1_finish
 
         ldy #0
         lda (SFX1_PTR_L),y      ; Byte 0: AUDF1 (Frequency)
@@ -321,7 +331,13 @@ update_tia_sfx:
         dec SFX1_FRAMES
         bne @tia_done
 
-        ; Effect finished: silence channel
+        ; Last frame just played in full; silence on the next tick
+        ; instead of clobbering the volume we just wrote.
+        lda #2
+        sta SFX1_ACTIVE
+        jmp @tia_done
+
+@sfx1_finish:
         lda #0
         sta AUDV1
         sta SFX1_ACTIVE
