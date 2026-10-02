@@ -8,8 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ym_core::{
-    CompilerOptions, CompressionLevel, DeltaCompiler, HzOption, SfxSequence, SystemHz, YmChannel,
-    YmFrame, YmSequence, YmSongDetails,
+    CompressionLevel, DeltaCompiler, HzOption, SfxSequence, SystemHz, YmChannel, YmFrame,
+    YmSequence,
 };
 
 #[derive(Parser, Debug)]
@@ -93,16 +93,28 @@ struct SongRenderArgs {
     #[arg(short, long, default_value_t = 1)]
     step: usize,
 
-    #[arg(long, value_enum, default_value = "full")]
-    compression: CompressionArg,
-
+    /// Pattern frames per chunk (default: automatic optimal search across candidates)
     #[arg(long)]
+    pattern_frames: Option<u8>,
+
+    /// Deprecated: legacy target stream format.
+    #[arg(long, value_enum, hide = true)]
+    format: Option<SongFormatArg>,
+
+    /// Deprecated: legacy compression level.
+    #[arg(long, value_enum, hide = true)]
+    compression: Option<CompressionArg>,
+
+    /// Deprecated: legacy deduplication flag.
+    #[arg(long, hide = true)]
     no_dedup: bool,
 
-    #[arg(long)]
+    /// Deprecated: legacy RLE flag.
+    #[arg(long, hide = true)]
     no_rle: bool,
 
-    #[arg(long)]
+    /// Deprecated: legacy max bytes truncation.
+    #[arg(long, hide = true)]
     max_bytes: Option<usize>,
 }
 
@@ -152,6 +164,12 @@ impl From<HzOptionArg> for HzOption {
             HzOptionArg::Hz60 => HzOption::Hz60,
         }
     }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum SongFormatArg {
+    Ysg,
+    Ycs,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -332,6 +350,7 @@ fn run_song_dump(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error>> {
     let SongRenderArgs {
         input,
@@ -340,10 +359,8 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         clock,
         target_clock,
         step,
-        compression,
-        no_dedup,
-        no_rle,
-        max_bytes,
+        pattern_frames,
+        ..
     } = args;
     let input = input.as_path();
     let output_path = output.unwrap_or_else(|| {
@@ -363,38 +380,26 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
     );
     sequence.frames = decimate_frames(&sequence.frames, step);
     apply_frame_rate(&mut sequence, hz.map(Into::into), step);
-    let compiler = DeltaCompiler::new();
-    let compression_level: CompressionLevel = compression.into();
-    let compiler_options = CompilerOptions {
-        dedup: !no_dedup,
-        rle: !no_rle,
-        ..CompilerOptions::default()
-    };
-    let mut compiled_song = with_spinner("Compiling song...", || {
-        compiler.compile_song(&sequence, compression_level, &compiler_options)
-    })?;
-    if let Some(limit) = max_bytes {
-        compiled_song = shrink_to_max_bytes(
-            &mut sequence,
-            &compiler,
-            compression_level,
-            &compiler_options,
-            compiled_song,
-            limit,
-        )?;
-    }
 
-    fs::write(&output_path, &compiled_song.bytes)?;
-    write_ysi_include(input, name, &output_path, &sequence, &compiled_song)?;
+    let compiled = with_spinner("Compiling YSG song...", || {
+        if let Some(pf) = pattern_frames {
+            ym_core::compile_ysg(&sequence, pf)
+        } else {
+            ym_core::compile_ysg_optimal(&sequence)
+        }
+    })?;
+    fs::write(&output_path, &compiled.bytes)?;
+    write_ysi_include(input, name, &output_path, &sequence, &compiled)?;
 
     let final_hz = sequence.timing.frame_rate.hz_value();
     println!(
-        "{} {} frames -> {} ({} bytes, pattern size {}, {} Hz)",
+        "{} {} frames -> {} ({} bytes, pattern frames {}, seq len {}, {} Hz)",
         style("RENDER SUCCESS:").bold().green(),
         style(sequence.frames.len()).cyan(),
         style(output_path.display()).cyan(),
-        style(compiled_song.bytes.len()).cyan(),
-        style(compiled_song.pattern_size).cyan(),
+        style(compiled.bytes.len()).cyan(),
+        style(compiled.pattern_frames).cyan(),
+        style(compiled.seq_len).cyan(),
         style(final_hz).cyan()
     );
 
@@ -406,8 +411,10 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         );
     }
     if let Some(original_size) = original_ym_size {
-        print_size_comparison(original_size, compiled_song.bytes.len());
+        let out_ext = output_path.extension().and_then(|e| e.to_str()).unwrap_or("ysg");
+        print_size_comparison(original_size, compiled.bytes.len(), out_ext);
     }
+    print_ysg_compression_report(&compiled);
     Ok(())
 }
 
@@ -488,12 +495,10 @@ fn write_ysi_include(
     name: &str,
     output_path: &Path,
     sequence: &YmSequence,
-    compiled_song: &YmSongDetails,
+    details: &ym_core::YsgSongDetails,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let final_hz = sequence.timing.frame_rate.hz_value();
     let (delay_y, delay_x) = ym_core::calculate_delay(final_hz);
-    let num_patterns = compiled_song.bytes.get(1).copied().unwrap_or(0);
-    let seq_len = compiled_song.bytes.get(2).copied().unwrap_or(0);
     let ysi_path = output_path.with_extension("ysi");
     let scope_name: String = name
         .chars()
@@ -508,14 +513,14 @@ fn write_ysi_include(
     let ysi_contents = format!(
         "; ca65 include generated by lym for {}\n\
          .scope {}\n\
-             MAX_FRAMES   = {}\n\
-             PLAYER_HZ    = {}\n\
-             MASTER_CLOCK = {}\n\
-             YM_DELAY     = {}\n\
-             YM_FINE      = {}\n\
-             PATTERN_SIZE = {}\n\
-             NUM_PATTERNS = {}\n\
-             SEQ_LEN      = {}\n\
+             MAX_FRAMES     = {}\n\
+             PLAYER_HZ      = {}\n\
+             MASTER_CLOCK   = {}\n\
+             YM_DELAY       = {}\n\
+             YM_FINE        = {}\n\
+             PATTERN_FRAMES = {}\n\
+             SEQ_LEN        = {}\n\
+             TOTAL_BYTES    = {}\n\
          .endscope\n",
         input.display(),
         scope_name,
@@ -524,12 +529,41 @@ fn write_ysi_include(
         sequence.timing.master_clock_hz,
         delay_y,
         delay_x,
-        compiled_song.pattern_size,
-        num_patterns,
-        seq_len,
+        details.pattern_frames,
+        details.seq_len,
+        details.bytes.len(),
     );
-    fs::write(ysi_path, ysi_contents)?;
+    fs::write(&ysi_path, &ysi_contents)?;
+
+    // If caller explicitly requested .ycs output, also emit .yci for compatibility
+    if output_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ycs"))
+    {
+        let yci_path = output_path.with_extension("yci");
+        fs::write(yci_path, ysi_contents)?;
+    }
+
     Ok(())
+}
+
+/// Prints a diagnostic compression report showing track layout and unique pattern counts.
+fn print_ysg_compression_report(details: &ym_core::YsgSongDetails) {
+    println!("\n{}", style("=== YSG COMPRESSION REPORT ===").bold());
+    println!(
+        "Total Stream Size: {} bytes (pattern frames {}, seq len {})",
+        style(details.bytes.len()).cyan(),
+        style(details.pattern_frames).cyan(),
+        style(details.seq_len).cyan()
+    );
+    println!(
+        "Track Layout:      Track A: {} B ({} uniq) | Track B: {} B ({} uniq) | Track C: {} B ({} uniq) | Global: {} B ({} uniq)",
+        details.track_a_bytes, details.unique_patterns_a,
+        details.track_b_bytes, details.unique_patterns_b,
+        details.track_c_bytes, details.unique_patterns_c,
+        details.track_global_bytes, details.unique_patterns_global,
+    );
 }
 
 /// Decodes a song source (`.ym` chiptune or `.json` sequence) into a `YmSequence`.
@@ -572,48 +606,10 @@ fn apply_frame_rate(sequence: &mut YmSequence, hz: Option<HzOption>, step: usize
     }
 }
 
-/// Repeatedly drops the last pattern and recompiles until the song fits within
-/// `limit` bytes, warning about how many frames were truncated in the process.
-fn shrink_to_max_bytes(
-    sequence: &mut YmSequence,
-    compiler: &DeltaCompiler,
-    compression_level: CompressionLevel,
-    compiler_options: &CompilerOptions,
-    mut compiled_song: YmSongDetails,
-    limit: usize,
-) -> Result<YmSongDetails, Box<dyn std::error::Error>> {
-    if compiled_song.bytes.len() <= limit {
-        return Ok(compiled_song);
-    }
 
-    let original_frames = sequence.frames.len();
-    loop {
-        let pattern_size = compiled_song.pattern_size;
-        let current_patterns = sequence.frames.len() / pattern_size;
-        if current_patterns == 0 {
-            return Err("Cannot fit even one pattern within --max-bytes limit".into());
-        }
-        sequence
-            .frames
-            .truncate((current_patterns - 1) * pattern_size);
-        compiled_song = compiler.compile_song(sequence, compression_level, compiler_options)?;
-        if compiled_song.bytes.len() <= limit {
-            break;
-        }
-    }
 
-    let dropped = original_frames - sequence.frames.len();
-    println!(
-        "{} truncated {} frames to fit within {} bytes",
-        style("WARNING:").bold().yellow(),
-        style(dropped).yellow(),
-        style(limit).yellow(),
-    );
-    Ok(compiled_song)
-}
-
-/// Prints the size delta between the original `.ym` chiptune and the compiled `.ysg`.
-fn print_size_comparison(original_size: usize, new_size: usize) {
+/// Prints the size delta between the original `.ym` chiptune and the compiled output stream.
+fn print_size_comparison(original_size: usize, new_size: usize, format_ext: &str) {
     let orig_f64 = usize_to_f64(original_size);
     let new_f64 = usize_to_f64(new_size);
     let pct_change = if original_size > 0 {
@@ -622,10 +618,11 @@ fn print_size_comparison(original_size: usize, new_size: usize) {
         0.0
     };
     println!(
-        "{} {} bytes (uncompressed .ym) -> {} bytes (.ysg) ({:.1}% change)",
+        "{} {} bytes (uncompressed .ym) -> {} bytes (.{}) ({:.1}% change)",
         style("SIZE:").bold(),
         style(original_size).cyan(),
         style(new_size).cyan(),
+        format_ext,
         pct_change
     );
 }
@@ -637,7 +634,7 @@ fn run_song_play(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
-    if extension == "json" || extension == "ysg" {
+    if extension == "json" || extension == "ysg" || extension == "ycs" {
         let mut sequence = load_song(input, None, None)?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = HzOption::from(hz_override).into();

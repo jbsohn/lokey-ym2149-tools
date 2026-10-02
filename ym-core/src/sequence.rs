@@ -34,224 +34,21 @@ pub struct YmSequence {
     pub frames: Vec<YmFrame>,
 }
 
-#[allow(dead_code)]
-struct YsgHeader {
-    pattern_size: usize,
-    num_unique: usize,
-    seq_len: usize,
-    loop_pattern: usize,
-    frame_rate_hz: u32,
-    master_clock_hz: u32,
-    last_pat_frames: usize,
-    features: u8,
-}
-
 impl YmSequence {
     /// Deserializes a compiled .ysg binary stream into a `YmSequence`.
     ///
     /// # Errors
-    ///
-    /// Returns an error if header validation fails, sequence table offsets are invalid,
-    /// or the byte payload is truncated before pattern data ends.
+    /// Returns an error if header validation fails or pattern payloads are corrupted.
     pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        let header = Self::parse_ysg_header(bytes)?;
-
-        let seq_table_start = 14;
-        let offset_table_start = seq_table_start + header.seq_len;
-        let pattern_data_start = offset_table_start + header.num_unique * 4;
-
-        if bytes.len() < pattern_data_start {
-            return Err("YSG file truncated before pattern data".into());
-        }
-
-        let sequence_table = Self::parse_sequence_table(bytes, seq_table_start, header.seq_len)?;
-        let offsets = Self::parse_offset_table(bytes, offset_table_start, header.num_unique)?;
-        let frames = Self::decode_ysg_pattern_frames(
-            bytes,
-            pattern_data_start,
-            &sequence_table,
-            &offsets,
-            &header,
-        )?;
-
-        let loop_start = if header.loop_pattern == 255 {
-            None
-        } else {
-            Some(header.loop_pattern * header.pattern_size)
-        };
-
-        Ok(Self {
-            name: name.to_string(),
-            timing: TimingConfig {
-                master_clock_hz: header.master_clock_hz,
-                frame_rate: SystemHz::Custom(header.frame_rate_hz),
-            },
-            priority: 0,
-            loop_start,
-            frames,
-        })
+        crate::ysg::decompile_ysg(name, bytes)
     }
 
-    /// Parses the 13-byte header from a YSG binary stream.
-    fn parse_ysg_header(bytes: &[u8]) -> Result<YsgHeader, Box<dyn std::error::Error>> {
-        if bytes.len() < 14 {
-            return Err("YSG file too small to contain header".into());
-        }
-        let pattern_size = bytes[0] as usize;
-        let num_unique = bytes[1] as usize;
-        let seq_len = bytes[2] as usize;
-        let loop_pattern = bytes[3] as usize;
-        let frame_rate_hz = u32::from_le_bytes(bytes[4..8].try_into()?);
-        let master_clock_hz = u32::from_le_bytes(bytes[8..12].try_into()?);
-        let last_pat_frames = bytes[12] as usize;
-        let features = bytes[13];
-        Ok(YsgHeader {
-            pattern_size,
-            num_unique,
-            seq_len,
-            loop_pattern,
-            frame_rate_hz,
-            master_clock_hz,
-            last_pat_frames,
-            features,
-        })
-    }
-
-    /// Reads the sequence pattern index table.
-    fn parse_sequence_table(
-        bytes: &[u8],
-        start: usize,
-        seq_len: usize,
-    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
-        if bytes.len() < start + seq_len {
-            return Err("YSG file truncated before sequence table end".into());
-        }
-        let mut sequence_table = Vec::with_capacity(seq_len);
-        for i in 0..seq_len {
-            sequence_table.push(bytes[start + i] as usize);
-        }
-        Ok(sequence_table)
-    }
-
-    /// Reads pattern byte offsets from the YSG header.
-    fn parse_offset_table(
-        bytes: &[u8],
-        start: usize,
-        num_unique: usize,
-    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
-        if bytes.len() < start + num_unique * 4 {
-            return Err("YSG file truncated before offset table end".into());
-        }
-        let mut offsets = Vec::with_capacity(num_unique);
-        for i in 0..num_unique {
-            let ptr = start + i * 4;
-            let offset = u32::from_le_bytes(bytes[ptr..ptr + 4].try_into()?);
-            offsets.push(offset as usize);
-        }
-        Ok(offsets)
-    }
-
-    /// Decodes pattern register streams into frames by iterating the sequence table.
-    fn decode_ysg_pattern_frames(
-        bytes: &[u8],
-        pattern_data_start: usize,
-        sequence_table: &[usize],
-        offsets: &[usize],
-        header: &YsgHeader,
-    ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
-        let mut frames = Vec::new();
-        let last_entry = sequence_table.len().saturating_sub(1);
-
-        for (entry_idx, &pattern_idx) in sequence_table.iter().enumerate() {
-            if pattern_idx >= header.num_unique {
-                return Err(format!(
-                    "Sequence index {} out of range (max {})",
-                    pattern_idx, header.num_unique
-                )
-                .into());
-            }
-            let start_ptr = pattern_data_start + offsets[pattern_idx];
-            if start_ptr >= bytes.len() {
-                return Err("YSG pattern offset out of bounds".into());
-            }
-            let frames_to_decode = if entry_idx == last_entry && header.last_pat_frames > 0 {
-                header.last_pat_frames
-            } else {
-                header.pattern_size
-            };
-            frames.extend(Self::decode_ysg_pattern(
-                bytes,
-                start_ptr,
-                frames_to_decode,
-                header.features,
-            )?);
-        }
-
-        Ok(frames)
-    }
-
-    fn is_rle_token(mask: u16, rle_enabled: bool) -> bool {
-        rle_enabled && (mask & crate::delta::RLE_FLAG) != 0
-    }
-
-    /// Decodes one pattern's delta-encoded register stream into frames.
-    /// Handles RLE tokens (mask bit 15 set) when features bit 0 is set.
-    fn decode_ysg_pattern(
-        bytes: &[u8],
-        start_ptr: usize,
-        pattern_size: usize,
-        features: u8,
-    ) -> Result<Vec<YmFrame>, Box<dyn std::error::Error>> {
-        let rle_enabled = (features & 0x01) != 0;
-        let mut frames = Vec::with_capacity(pattern_size);
-        let mut pp = start_ptr;
-        let mut registers = [0u8; 14];
-
-        while frames.len() < pattern_size {
-            if pp + 1 >= bytes.len() {
-                return Err("Unexpected EOF in YSG pattern data".into());
-            }
-            let mask = u16::from(bytes[pp]) | (u16::from(bytes[pp + 1]) << 8);
-            pp += 2;
-
-            if Self::is_rle_token(mask, rle_enabled) {
-                if pp >= bytes.len() {
-                    return Err("Unexpected EOF in YSG RLE count byte".into());
-                }
-                let n = bytes[pp] as usize;
-                pp += 1;
-                let emit = (n + 1).min(pattern_size - frames.len());
-                let frame = {
-                    let mut f = Self::registers_to_frame(&registers);
-                    f.envelope_shape = None;
-                    f
-                };
-                for _ in 0..emit {
-                    frames.push(frame.clone());
-                }
-                continue;
-            }
-
-            let r13_written = (mask & (1 << 13)) != 0;
-
-            for (reg, slot) in registers.iter_mut().enumerate() {
-                if (mask & (1 << reg)) != 0 {
-                    if pp >= bytes.len() {
-                        return Err("Unexpected EOF in YSG pattern register payload".into());
-                    }
-                    *slot = bytes[pp];
-                    pp += 1;
-                }
-            }
-
-            let mut frame = Self::registers_to_frame(&registers);
-            if !r13_written {
-                frame.envelope_shape = None;
-            }
-            frames.push(frame);
-        }
-
-        Ok(frames)
+    /// Deserializes a compiled .ycs binary stream into a `YmSequence`.
+    ///
+    /// # Errors
+    /// Returns an error if header validation fails or pattern payloads are corrupted.
+    pub fn from_ycs(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        crate::ysg::decompile_ysg(name, bytes)
     }
 
     /// Sanitizes a 16-byte raw YM frame into 14 hardware registers, stripping unused bits
@@ -478,7 +275,7 @@ impl YmSequence {
         Ok(decompress_if_needed(ym_data)?.len())
     }
 
-    /// Loads a `YmSequence` from a file path (.ysg, .ym, or .json).
+    /// Loads a `YmSequence` from a file path (.ycs, .ysg, .ym, or .json).
     ///
     /// # Errors
     ///
@@ -490,9 +287,14 @@ impl YmSequence {
         target_clock_override: Option<u32>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let ext_lower = extension.to_ascii_lowercase();
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
 
-        match extension {
+        match ext_lower.as_str() {
+            "ycs" => {
+                let bytes = std::fs::read(input)?;
+                Self::from_ycs(name, &bytes)
+            }
             "ysg" => {
                 let bytes = std::fs::read(input)?;
                 Self::from_ysg(name, &bytes)
@@ -508,7 +310,7 @@ impl YmSequence {
                 Ok(seq)
             }
             _ => Err(format!(
-                "Unsupported song file extension '.{extension}'. Expected .ysg, .ym, or .json"
+                "Unsupported song file extension '.{extension}'. Expected .ycs, .ysg, .ym, or .json"
             )
             .into()),
         }

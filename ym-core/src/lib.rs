@@ -2,6 +2,10 @@ pub mod delta;
 pub mod player;
 pub mod sequence;
 pub mod timing;
+pub mod ysg;
+pub mod ycs {
+    pub use super::ysg::*;
+}
 
 pub use delta::{CompilerOptions, CompressionLevel, DeltaCompiler, YmSongDetails, RLE_FLAG};
 pub use player::{YmDataRenderer, YmMixer, YmSfxRenderer, YmSongRenderer};
@@ -10,6 +14,13 @@ pub use timing::{
     calculate_delay, HzOption, SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK,
     ZX_SPECTRUM_CLOCK,
 };
+pub use ysg::{
+    compile_ycs, compile_ycs_optimal, compile_ysg, compile_ysg_optimal, decompile_ycs,
+    decompile_ysg, GlobalFrame, TrackDescriptor, VoiceFrame, YcsHeader, YcsSongDetails,
+    YsgHeader, YsgSongDetails, CANDIDATE_PATTERN_FRAMES, SENTINEL_EMPTY_PATTERN, YCS_HEADER_SIZE,
+    YCS_MAGIC, YCS_VERSION, YSG_HEADER_SIZE, YSG_MAGIC, YSG_VERSION,
+};
+
 
 #[cfg(test)]
 mod tests {
@@ -159,7 +170,7 @@ mod tests {
     #[test]
     fn test_song_compilation_and_parsing() {
         let mut frames = Vec::new();
-        // Create 70 frames to span beyond a 64-frame pattern block
+        // Create 70 frames to span beyond a 48-frame pattern block
         for i in 0u16..70u16 {
             frames.push(YmFrame {
                 tone_a: Some(200 + i),
@@ -168,8 +179,6 @@ mod tests {
                 ..Default::default()
             });
         }
-        // Deliberately non-default timing (as `--step` decimation or `.ym` import would
-        // produce) to catch the format silently dropping it back to hardcoded defaults.
         let song = YmSequence {
             name: "test_song".to_string(),
             timing: TimingConfig {
@@ -187,13 +196,9 @@ mod tests {
             .unwrap();
         let ysg_bytes = details.bytes;
 
-        let chosen_size = details.pattern_size;
-        assert_eq!(ysg_bytes[0] as usize, chosen_size);
-        let seq_len = ysg_bytes[2] as usize;
+        assert_eq!(&ysg_bytes[0..2], b"YS");
 
         let decoded = YmSequence::from_ysg("test_song", &ysg_bytes).unwrap();
-        // Should be padded to a multiple of the chosen pattern size
-        assert_eq!(decoded.frames.len(), chosen_size * seq_len);
         assert_eq!(decoded.frames[0].tone_a, Some(200));
         assert_eq!(decoded.frames[0].volume_a, Some(15));
         assert_eq!(decoded.frames[69].tone_a, Some(269));
@@ -211,8 +216,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rle_reduces_idle_frames() {
-        // Build a song with a long silent section — should shrink with RLE enabled.
+    fn test_idle_frames_compression() {
+        // Build a song with a long silent section — channel-split wait tokens compress it.
         let mut frames = Vec::new();
         frames.push(YmFrame {
             tone_a: Some(440),
@@ -224,7 +229,7 @@ mod tests {
             frames.push(YmFrame::default()); // 50 idle frames
         }
         let song = YmSequence {
-            name: "rle_test".to_string(),
+            name: "idle_test".to_string(),
             timing: TimingConfig {
                 master_clock_hz: ATARI_7800_CLOCK,
                 frame_rate: SystemHz::Hz50,
@@ -233,43 +238,17 @@ mod tests {
             loop_start: None,
             frames,
         };
-        let compiler = DeltaCompiler::new();
-        let with_rle = compiler
-            .compile_song(
-                &song,
-                CompressionLevel::Full,
-                &CompilerOptions {
-                    rle: true,
-                    ..CompilerOptions::default()
-                },
-            )
-            .unwrap();
-        let without_rle = compiler
-            .compile_song(
-                &song,
-                CompressionLevel::Full,
-                &CompilerOptions {
-                    rle: false,
-                    ..CompilerOptions::default()
-                },
-            )
-            .unwrap();
-        assert!(
-            with_rle.bytes.len() < without_rle.bytes.len(),
-            "RLE should reduce size for idle-heavy songs"
-        );
+        let details = compile_ysg(&song, 64).unwrap();
+        assert!(details.track_a_bytes < 20);
 
         // Round-trip: decoded frame count must match
-        let decoded = YmSequence::from_ysg("rle_test", &with_rle.bytes).unwrap();
-        assert_eq!(
-            decoded.frames.len(),
-            song.frames.len().next_multiple_of(with_rle.pattern_size)
-        );
+        let decoded = YmSequence::from_ysg("idle_test", &details.bytes).unwrap();
+        assert_eq!(decoded.frames.len(), 64);
     }
 
     #[test]
     fn test_truncated_ysg_returns_err() {
-        let truncated_bytes = vec![64, 2, 5, 0]; // 4 bytes instead of >=12
+        let truncated_bytes = vec![b'Y', b'S', 1, 0]; // 4 bytes instead of 20
         assert!(YmSequence::from_ysg("bad", &truncated_bytes).is_err());
     }
 
