@@ -26,7 +26,21 @@ ratios and timing.
 
 ### 2. Music Format Specification (`.ysg`)
 
-The `.ysg` (YM Song) format is a relocatable, 4-stream channel-split binary container optimized for 8-bit microprocessors (such as the 6502 on the Atari 7800 and Apple II Mockingboard). It decouples PSG channels into independent voice streams, maximizing cross-pattern deduplication while minimizing runtime CPU cycles.
+The `.ysg` (YM Song) format is a relocatable, 4-stream channel-split binary container optimized for 8-bit microprocessors (such as the 6502 on the Atari 7800 and Apple II Mockingboard). Inspired by the Arkos Tracker AKY streaming format, it decouples PSG channels into independent voice streams, maximizing cross-pattern deduplication while minimizing runtime CPU cycles.
+
+#### Compression Architecture & Deprecation of Legacy Format
+
+Earlier versions of `lokey-ym-tools` used a monolithic 14-register 16-bit delta-mask format (`DeltaCompiler`) wrapped in a 14-byte container header. While functional, that format suffered from significant limitations:
+- **Coupled Channels**: Register diffs were evaluated across all 14 PSG registers simultaneously. If Channel A had activity, Channels B and C could not enter run-length wait states, resulting in bloated files (~15 KB – 116 KB).
+- **Runtime CPU Waste**: The target 6502 replayer had to decode 16-bit bitmasks, unpack register bytes into RAM buffers, and perform dynamic bitmasking for mixer (R7) updates on every frame.
+
+The modern channel-split `.ysg` format rendered the legacy format completely obsolete:
+- **4-Stream Decoupling**: Voice A, Voice B, Voice C, and Global tracks are compressed independently with their own pattern deduplication tables.
+- **Run-Length Idle Tokens**: 1-byte wait tokens (`0bbbbbbb`) allow inactive or sustained channels to sleep for up to 127 frames without reading or writing PSG registers.
+- **Precomputed Mixer Updates**: Mixer (R7) values are resolved at build time into the Global stream, removing runtime bitmask calculations.
+- **Automatic Pattern Frame Exploration**: The compiler automatically benchmarks candidate pattern sizes (`[16, 24, 32, 48, 64, 96, 128]`) to select the smallest resulting binary.
+
+Because the new architecture achieved a 50%–75% size reduction (bringing typical tracks down to ~1.7 KB – 18 KB) with near-zero runtime CPU overhead, the legacy delta format was dropped entirely from `ym-core` and the CLI toolchain.
 
 ### Container Header Structure (20 Bytes Fixed)
 

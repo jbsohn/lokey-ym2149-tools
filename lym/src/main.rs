@@ -256,12 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 start,
             } => run_song_dump(&input, frames, start),
             SongCommands::Render { args } => run_song_render(args),
-            SongCommands::Play {
-                input,
-                hz,
-                raw,
-                ..
-            } => run_song_play(&input, hz, raw),
+            SongCommands::Play { input, hz, raw, .. } => run_song_play(&input, hz, raw),
         },
         MainCommands::Sfx { command } => match command {
             SfxCommands::Render { common, output } => run_sfx_render(&common, output),

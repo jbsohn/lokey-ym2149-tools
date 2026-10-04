@@ -51,7 +51,7 @@ lym song render --input <PATH> [OPTIONS]
    By default, `lym` benchmarks candidate pattern sizes (`[16, 24, 32, 48, 64, 96, 128]`) and automatically selects the size that yields the smallest total compressed binary for the given song. You can override this and lock in a specific pattern size using `--pattern-frames <N>`.
 
 2. **4-Stream Decoupled Architecture**:
-   Rather than packing all 14 registers into monolithic chunks, the compiler separates the song into four independent streams: Voice A, Voice B, Voice C, and Global/Envelope. This allows individual channels to repeat and deduplicate patterns independently (often reducing stream size by 40%–50% compared to monolithic linear bitmasks).
+   Rather than packing all 14 registers into monolithic chunks, the compiler separates the song into four independent streams: Voice A, Voice B, Voice C, and Global/Envelope. This allows individual channels to repeat and deduplicate patterns independently (achieving a 50%–75% stream size reduction compared to the obsolete monolithic linear bitmask format).
 
 3. **Run-Length Idle Frame Skipping**:
    When a channel sustains a note or remains silent, runs of idle frames (1 to 127 frames) are collapsed into single-byte wait tokens (`0bbbbbbb`). The 6502 replayer handles this in just 12 CPU cycles (`BPL .is_wait`) without reading or writing PSG registers.
@@ -60,7 +60,7 @@ lym song render --input <PATH> [OPTIONS]
    All tone and noise enables across channels A, B, and C are resolved at build time into precomputed R7 mixer register values in the Global stream. The 6502 replayer writes R7 directly without performing runtime bitmask operations.
 
 5. **Temporal Frame Decimation (`-s, --step <N>`)**:
-   Merges `N`-frame windows by selecting peak volume and tone values per channel while preserving envelope parameters. For long songs exceeding a 32KB flat cartridge ROM budget, `--step 2` reduces the frame count by 50% while scaling the replayer delta appropriately.
+   Merges `N`-frame windows by selecting peak volume and tone values per channel while preserving envelope parameters. For long songs exceeding a 32KB flat cartridge ROM budget, `--step 2` reduces the frame count by 50% while scaling the replayer playback rate accumulator step appropriately.
 
 *(For detailed binary specifications of the `.ysg` container layout and stream opcodes, see the [File Formats Specification](FileFormats.md)).*
 
@@ -187,8 +187,4 @@ lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 * `1`–`9`, `0`, `SPACE`: Trigger sound effects from loaded bank.
 * `←` / `→`: Seek backward / forward by 5-second intervals.
 * `q` / `Q`: Mute audio and quit mixer.
-
-> [!TIP]
-> **Jam Session Workflow**: Use `lym mix` as your interactive audio sandbox. Tap keys `1`-`9` while your track loops to
-make sure laser and explosion SFX cleanly override music channels without causing envelope clicks or channel distortion.
 
