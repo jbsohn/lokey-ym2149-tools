@@ -25,15 +25,28 @@ Self-contained assembly replayer samples driving `.ysg`/`.yfx` streams:
 
 ---
 
-## Architecture: Host-Precomputed Audio Streaming
+## Architecture: Producers & Streaming Consumer
 
-Complex 16-bit computer music (e.g. Atari ST `.ym` tracks) is pre-compiled into channel-split opcode streams (`.ysg`) on the host PC:
+This toolchain adopts a **host-precomputed producer/consumer pipeline**:
 
-- **What Is Stripped During Compilation**:
-  - **PCM Digi-Drums**: High-rate (4–10 kHz) 8-bit PCM sample buffers in YM6 files are stripped because 8-bit target CPUs cannot stream PCM during gameplay. Pitched PSG channels (square waves, white noise, hardware envelopes) are preserved.
-  - **Inaudible Register Sweeps**: Register changes on muted channels (volume `0` or disabled in mixer `R7`) are normalized.
-  - **Redundant Register Writes**: Unchanged values are omitted via opcode bit flags.
-- **Compression & ROM Footprint**: The channel-split `.ysg` format decouples voice streams, compresses idle runs into 1-byte wait tokens (`0bbbbbbb`), precomputes mixer (`R7`) values into the Global stream, and benchmarks candidate pattern sizes. Typical streams compile to **~1.7 KB – 18 KB** (e.g., `ND-Loader` is 1.7 KB), with **near-zero CPU overhead** on the target microprocessor.
+- **Producers**:
+  - **Atari ST**: Decades of chiptune compositions authored in popular ST trackers like [Music-Mon](https://demozoo.org/productions/71415/) and [maxYMiser](https://github.com/ggnkua/maxYMiser), exported as `.ym` register streams.
+  - **Modern Workstations (macOS, Windows, Linux)**:
+    - **[Furnace](https://github.com/tildearrow/furnace)**: Modern multi-system tracker exporting `.ym` register streams.
+    - **[Arkos Tracker](https://www.julien-nevo.com/arkostracker/)**: Cross-platform tracker for AY-3-8910/YM2149 music and sound effects.
+    - **ayFX Edit**: Sound effect designer for AY/YM PSG chips ([ayfxedit-improved](https://github.com/Threetwosevensixseven/ayfxedit-improved) for Windows/Wine, original by [Shiru](https://shiru.untergrund.net/software.shtml), or [Web version by Remy Sharp](https://zx.remysharp.com/audio/#src=MjA4LDMy)) exporting `.afx` effects, `.afb` banks, and `.csv` sequences.
+    - **Hand-authored JSON**: Direct text-editable sequence definitions for rapid iteration.
+- **Consumer (Atari 7800 & 8-Bit Targets)**: The workstation pre-compiles music into channel-split `.ysg` opcode streams and sound effects into 5-byte `.yfx` frames. The 6502 simply consumes and streams opcodes directly to the YM2149 during VBLANK, keeping CPU overhead near zero for gameplay.
+
+### What Is Stripped During Compilation
+
+- **PCM Digi-Drums**: High-rate (4–10 kHz) 8-bit PCM sample buffers in YM6 files are stripped because 8-bit target CPUs cannot stream PCM during active gameplay. Pitched PSG channels (square waves, white noise, hardware envelopes) are preserved.
+- **Inaudible Register Sweeps**: Register changes on muted channels (volume `0` or disabled in mixer `R7`) are normalized.
+- **Redundant Register Writes**: Unchanged values are omitted via per-voice opcode bit flags.
+
+### Compression & ROM Footprint
+
+The channel-split `.ysg` format decouples voice streams, compresses idle runs into 1-byte wait tokens (`0bbbbbbb`), precomputes mixer (`R7`) values into the Global stream, and benchmarks candidate pattern sizes. Typical streams compile to **~1.7 KB – 18 KB** (e.g., `ND-Loader` is 1.7 KB), with **near-zero CPU overhead** on the target microprocessor.
 
 ---
 
@@ -87,10 +100,18 @@ cargo run --bin lym -- mix --song tests/fixtures/song/ND-Loader.ysg --sfx tests/
 ## Acknowledgements & Credits
 
 - **[Arkos Tracker](https://www.julien-nevo.com/arkostracker/)**: The `.ysg` channel-split streaming format was inspired by the **AKY** format designed by Julien Névo (Targhan).
+- **[Shiru](https://shiru.untergrund.net/software.shtml)**: Designer of the **ayFX** sound effect formats (`.afx`, `.afb`) and author of the original `ayFX Edit` utility.
+- **Arnaud Carré (Leonard/OXG)**: Creator of the **`.ym` file format specifications** (YM2 through YM6) and curator of the [StSound](http://leonard.oxg.free.fr/stsound/stsound.html) chiptune library and archive.
 - **`ym2149-rs` Ecosystem**: Low-level PSG emulation and chiptune parsing leverage crates by [slippyex](https://github.com/slippyex):
   - **[`ym2149`](https://crates.io/crates/ym2149)**: Yamaha YM-2149 PSG emulator core.
   - **[`ym2149-common`](https://crates.io/crates/ym2149-common)**: Player traits and frequency helper types.
   - **[`ym2149-ym-replayer`](https://crates.io/crates/ym2149-ym-replayer)**: Atari ST `.ym` music parser and player.
+- **Musical Composers**: Benchmark songs in `tests/fixtures/song/` were sourced from the StSound collection. Track composers include:
+  - **Jochen Hippel (Mad Max)** (*An Cool*, *Enchanted Lands*, *Jess*, *Scout*)
+  - **Jeroen Tel (Maniacs of Noise)** (*Scout* original composition)
+  - **TAO / ACF** (*Nostalgic-O-Demo*)
+  - **Jedi / Sector One** and **Furax / Equinox** (*Virtual Escape*)
+  *(Detailed track attributions are listed in [docs/Musicians.md](docs/Musicians.md)).*
 
 ---
 
