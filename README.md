@@ -11,12 +11,11 @@ mix music and SFX with real-time keyboard controls—all before touching target 
 
 ## Crates in the Workspace
 
-- **`ym-core`**: The foundational library containing the platform-agnostic `DeltaCompiler`, YM register configurations,
-  frame structures, format decoders, and the real-time audio playback engine.
+- **`ym-core`**: The foundational library containing the channel-split music compiler (`ysg`), sound effect compiler
+  (`yfx`), format abstractions (`SongInput`, `SongFile`, `SfxInput`, `SfxFile`), frame decoders (`YmFile`, `AyfxFile`),
+  and real-time software PSG emulation renderers (`player`).
 - **`lym`**: The unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs
   and sound effects.
-- **`a78tool`**: Atari 7800 `.a78` ROM header utility
-  (see [lokey-7800-tools](file:///home/john/Projects/lokey-7800-tools)).
 
 ---
 
@@ -53,8 +52,8 @@ for every platform.
 This toolchain adopts a **host-precomputed streaming architecture**:
 
 - **Offloaded Heavy Compute**: Complex 16-bit computer music (e.g. Atari ST `.ym` tracks) is pre-compiled into
-  pattern-deduplicated register delta streams (`.ysg`) on your workstation PC. All pitch scaling, envelope calculations,
-  and frame diffing happen at build time.
+  channel-split opcode streams (`.ysg`) on your workstation PC. All pitch scaling, envelope calculations, and track
+  pattern deduplication happen at build time.
 - **What Is Stripped During Compilation**:
     - **PCM Digi-Drum Sample Data**: High-rate (4kHz–10kHz) 8-bit PCM sample buffers embedded in Atari ST YM6 files are
       automatically stripped because 8-bit CPUs cannot stream 4,000+ Hz PCM bytes during active gameplay. All pitched
@@ -64,17 +63,19 @@ This toolchain adopts a **host-precomputed streaming architecture**:
       track, drum-heavy songs like `ND-Loader` will sound noticeably different).*
     - **Inaudible Register Sweeps**: Pitch/noise register changes occurring on channels with volume `0` or disabled
       mixer outputs (`R7`) are normalized, eliminating unhearable data from the stream.
-    - **Redundant Register Writes**: Consecutive unchanged register values across frames are diffed out via 16-bit delta
-      bitmasks, and idle frame runs are compressed via RLE tokens.
-- **The Trade-Off**: Pre-compiled `.ysg` streams require larger ROM storage (~15 KB – 28 KB vs 2 KB – 5 KB for native
+    - **Redundant Register Writes**: Consecutive unchanged register values across frames are skipped via per-voice
+      opcode bit flags, mixer updates are precomputed into the Global stream, and idle frame runs are compressed via RLE
+      tokens (`0bbbbbbb`).
+- **The Trade-Off**: Pre-compiled `.ysg` streams require larger ROM storage (~8 KB – 20 KB vs 2 KB – 5 KB for native
   trackers). However, in exchange for ROM space, **6502 CPU overhead is reduced to near zero** during gameplay — the
-  6502 simply reads pre-diffed bytes during VBLANK interrupts and writes directly to PSG register ports.
+  6502 simply decodes compact opcode bytes during VBLANK interrupts and writes directly to PSG register ports.
 - **High-Fidelity PSG Audio Streaming**: 8-bit retro systems (like the Atari 7800 with YM2149 expansion hardware) can
   stream rich 16-bit Atari ST chiptunes at full PSG fidelity (see digi-drum caveat above) while preserving virtually all
   CPU cycles for game graphics, collision detection, and logic.
 
 > [!TIP]
-> **Why precompute on your PC?** By baking pitch-scaling, delta bitmasks, and pattern deduplication into the `.ysg`
+> **Why precompute on your PC?** By baking pitch-scaling, channel-split opcode streams, and pattern deduplication into
+the `.ysg`
 binary at build time, your retro game loop only pays a tiny VBLANK register write budget—giving your 8-bit game the
 voice of a 16-bit Atari ST.
 

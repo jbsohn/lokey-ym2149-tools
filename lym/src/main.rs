@@ -7,9 +7,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use ym_core::traits::{SfxFile, SongFile};
 use ym_core::{
-    CompressionLevel, DeltaCompiler, HzOption, SfxSequence, SystemHz, YmChannel, YmFrame,
-    YmSequence,
+    HzOption, SfxSequence, SongContainer, SystemHz, YfxFile, YmChannel, YmSequence, YsgFile,
+    YsgSongDetails,
 };
 
 #[derive(Parser, Debug)]
@@ -97,10 +98,6 @@ struct SongRenderArgs {
     #[arg(long)]
     pattern_frames: Option<u8>,
 
-    /// Deprecated: legacy target stream format.
-    #[arg(long, value_enum, hide = true)]
-    format: Option<SongFormatArg>,
-
     /// Deprecated: legacy compression level.
     #[arg(long, value_enum, hide = true)]
     compression: Option<CompressionArg>,
@@ -144,7 +141,12 @@ enum SongCommands {
         #[arg(long, value_enum)]
         hz: Option<HzOptionArg>,
 
+        /// Use raw YM replayer without interactive seeking controls
         #[arg(long)]
+        raw: bool,
+
+        /// Deprecated: interactive sequence playback is now default for all formats
+        #[arg(long, hide = true)]
         via_sequence: bool,
     },
 }
@@ -166,27 +168,11 @@ impl From<HzOptionArg> for HzOption {
     }
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-enum SongFormatArg {
-    Ysg,
-    Ycs,
-}
-
 #[derive(ValueEnum, Debug, Clone, Copy)]
 enum CompressionArg {
     Full,
     DeltaOnly,
     None,
-}
-
-impl From<CompressionArg> for CompressionLevel {
-    fn from(a: CompressionArg) -> Self {
-        match a {
-            CompressionArg::Full => CompressionLevel::Full,
-            CompressionArg::DeltaOnly => CompressionLevel::DeltaOnly,
-            CompressionArg::None => CompressionLevel::None,
-        }
-    }
 }
 
 // --- SFX SUBCOMMANDS ---
@@ -259,22 +245,6 @@ fn with_spinner<T>(message: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
-fn load_song(
-    input: &Path,
-    clock_override: Option<u32>,
-    target_clock_override: Option<u32>,
-) -> Result<YmSequence, Box<dyn std::error::Error>> {
-    YmSequence::load_from_path(input, clock_override, target_clock_override)
-}
-
-fn load_sfx(input: &Path, bank_index: usize) -> Result<SfxSequence, Box<dyn std::error::Error>> {
-    SfxSequence::load_from_path(input, bank_index)
-}
-
-fn load_all_sfx(inputs: &[PathBuf]) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>> {
-    SfxSequence::load_all_from_paths(inputs)
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = LymCli::parse();
 
@@ -289,8 +259,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SongCommands::Play {
                 input,
                 hz,
-                via_sequence,
-            } => run_song_play(&input, hz, via_sequence),
+                raw,
+                ..
+            } => run_song_play(&input, hz, raw),
         },
         MainCommands::Sfx { command } => match command {
             SfxCommands::Render { common, output } => run_sfx_render(&common, output),
@@ -378,17 +349,17 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         style("LOADING:").bold().cyan(),
         style(input.display()).cyan()
     );
-    sequence.frames = decimate_frames(&sequence.frames, step);
+    sequence.decimate(step);
     apply_frame_rate(&mut sequence, hz.map(Into::into), step);
 
-    let compiled = with_spinner("Compiling YSG song...", || {
+    let (ysg_file, compiled) = with_spinner("Compiling YSG song...", || {
         if let Some(pf) = pattern_frames {
-            ym_core::compile_ysg(&sequence, pf)
+            YsgFile::from_sequence(&sequence, pf)
         } else {
-            ym_core::compile_ysg_optimal(&sequence)
+            YsgFile::from_sequence_optimal(&sequence)
         }
     })?;
-    fs::write(&output_path, &compiled.bytes)?;
+    fs::write(&output_path, ysg_file.to_bytes())?;
     write_ysi_include(input, name, &output_path, &sequence, &compiled)?;
 
     let final_hz = sequence.timing.frame_rate.hz_value();
@@ -411,81 +382,14 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         );
     }
     if let Some(original_size) = original_ym_size {
-        let out_ext = output_path.extension().and_then(|e| e.to_str()).unwrap_or("ysg");
+        let out_ext = output_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("ysg");
         print_size_comparison(original_size, compiled.bytes.len(), out_ext);
     }
     print_ysg_compression_report(&compiled);
     Ok(())
-}
-
-/// Decimates `frames` by taking one output frame per `step`-sized window. For each
-/// of the three channels independently, the loudest frame in the window is picked
-/// and its tone/volume/enable state copied into the output frame, so that brief
-/// transients louder than their neighbors survive decimation instead of being
-/// skipped outright.
-fn decimate_frames(frames: &[YmFrame], step: usize) -> Vec<YmFrame> {
-    let limit = frames.len();
-    let mut decimated_frames = Vec::new();
-    let mut i = 0;
-    while i < limit {
-        let window_end = (i + step).min(limit);
-        let mut best_idx_a = i;
-        let mut best_vol_a = frames[i].volume_a.unwrap_or(0);
-        let mut best_idx_b = i;
-        let mut best_vol_b = frames[i].volume_b.unwrap_or(0);
-        let mut best_idx_c = i;
-        let mut best_vol_c = frames[i].volume_c.unwrap_or(0);
-
-        for (idx, f) in frames.iter().enumerate().take(window_end).skip(i) {
-            let v_a = f.volume_a.unwrap_or(0);
-            if v_a > best_vol_a {
-                best_vol_a = v_a;
-                best_idx_a = idx;
-            }
-            let v_b = f.volume_b.unwrap_or(0);
-            if v_b > best_vol_b {
-                best_vol_b = v_b;
-                best_idx_b = idx;
-            }
-            let v_c = f.volume_c.unwrap_or(0);
-            if v_c > best_vol_c {
-                best_vol_c = v_c;
-                best_idx_c = idx;
-            }
-        }
-
-        let dominant_idx = if best_vol_a >= best_vol_b && best_vol_a >= best_vol_c {
-            best_idx_a
-        } else if best_vol_b >= best_vol_c {
-            best_idx_b
-        } else {
-            best_idx_c
-        };
-
-        let mut final_frame = frames[i].clone();
-        final_frame.volume_a = frames[best_idx_a].volume_a;
-        final_frame.tone_a = frames[best_idx_a].tone_a;
-        final_frame.tone_enable_a = frames[best_idx_a].tone_enable_a;
-        final_frame.noise_enable_a = frames[best_idx_a].noise_enable_a;
-
-        final_frame.volume_b = frames[best_idx_b].volume_b;
-        final_frame.tone_b = frames[best_idx_b].tone_b;
-        final_frame.tone_enable_b = frames[best_idx_b].tone_enable_b;
-        final_frame.noise_enable_b = frames[best_idx_b].noise_enable_b;
-
-        final_frame.volume_c = frames[best_idx_c].volume_c;
-        final_frame.tone_c = frames[best_idx_c].tone_c;
-        final_frame.tone_enable_c = frames[best_idx_c].tone_enable_c;
-        final_frame.noise_enable_c = frames[best_idx_c].noise_enable_c;
-
-        final_frame.noise_period = frames[dominant_idx].noise_period;
-        final_frame.envelope_period = frames[dominant_idx].envelope_period;
-        final_frame.envelope_shape = frames[dominant_idx].envelope_shape;
-
-        decimated_frames.push(final_frame);
-        i += step;
-    }
-    decimated_frames
 }
 
 /// Writes the `.ysi` ca65 include sidecar (frame/pattern counts, timing constants)
@@ -495,10 +399,10 @@ fn write_ysi_include(
     name: &str,
     output_path: &Path,
     sequence: &YmSequence,
-    details: &ym_core::YsgSongDetails,
+    details: &YsgSongDetails,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let final_hz = sequence.timing.frame_rate.hz_value();
-    let (delay_y, delay_x) = ym_core::calculate_delay(final_hz);
+    let (delay_y, delay_x) = sequence.timing.frame_rate.calculate_delay();
     let ysi_path = output_path.with_extension("ysi");
     let scope_name: String = name
         .chars()
@@ -535,21 +439,11 @@ fn write_ysi_include(
     );
     fs::write(&ysi_path, &ysi_contents)?;
 
-    // If caller explicitly requested .ycs output, also emit .yci for compatibility
-    if output_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("ycs"))
-    {
-        let yci_path = output_path.with_extension("yci");
-        fs::write(yci_path, ysi_contents)?;
-    }
-
     Ok(())
 }
 
 /// Prints a diagnostic compression report showing track layout and unique pattern counts.
-fn print_ysg_compression_report(details: &ym_core::YsgSongDetails) {
+fn print_ysg_compression_report(details: &YsgSongDetails) {
     println!("\n{}", style("=== YSG COMPRESSION REPORT ===").bold());
     println!(
         "Total Stream Size: {} bytes (pattern frames {}, seq len {})",
@@ -576,18 +470,19 @@ fn decode_song_input(
     clock: Option<u32>,
     target_clock: Option<u32>,
 ) -> Result<(YmSequence, usize, Option<usize>), Box<dyn std::error::Error>> {
-    if extension.eq_ignore_ascii_case("ym") {
-        let bytes = fs::read(input)?;
-        let original_ym_size = Some(YmSequence::ym_decompressed_len(&bytes)?);
-        let (sequence, digidrum_frames) = with_spinner("Decoding YM chiptune...", || {
-            YmSequence::from_ym_data(name, &bytes, clock, target_clock)
-        })?;
-        Ok((sequence, digidrum_frames, original_ym_size))
-    } else {
-        let content = fs::read_to_string(input)?;
-        let sequence = serde_json::from_str(&content)?;
-        Ok((sequence, 0, None))
-    }
+    let bytes = fs::read(input)?;
+    let container = with_spinner("Decoding song...", || {
+        SongContainer::from_bytes(name, extension, &bytes, clock)
+    })?;
+
+    let (digidrum_frames, original_ym_size) = match &container {
+        SongContainer::Ym(ym) => (ym.digidrum_frames, Some(ym.uncompressed_len)),
+        SongContainer::Ysg(_) => (0, Some(bytes.len())),
+        SongContainer::Json(_) => (0, None),
+    };
+
+    let sequence = container.to_sequence(name, target_clock)?;
+    Ok((sequence, digidrum_frames, original_ym_size))
 }
 
 /// Applies an explicit `--hz` override, or (when frame-decimating via `--step`)
@@ -605,8 +500,6 @@ fn apply_frame_rate(sequence: &mut YmSequence, hz: Option<HzOption>, step: usize
         sequence.timing.frame_rate = SystemHz::Custom(decimated_hz);
     }
 }
-
-
 
 /// Prints the size delta between the original `.ym` chiptune and the compiled output stream.
 fn print_size_comparison(original_size: usize, new_size: usize, format_ext: &str) {
@@ -630,28 +523,20 @@ fn print_size_comparison(original_size: usize, new_size: usize, format_ext: &str
 fn run_song_play(
     input: &Path,
     hz: Option<HzOptionArg>,
-    via_sequence: bool,
+    raw: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 
-    if extension == "json" || extension == "ysg" || extension == "ycs" {
-        let mut sequence = load_song(input, None, None)?;
-        if let Some(hz_override) = hz {
-            sequence.timing.frame_rate = HzOption::from(hz_override).into();
-        }
+    if raw && extension.eq_ignore_ascii_case("ym") {
         println!(
-            "{} {} ({} Hz)...",
+            "{} {} (raw YM replayer mode)...",
             style("LOADING:").bold().cyan(),
-            style(input.display()).cyan(),
-            sequence.timing.frame_rate.hz_value()
+            style(input.display()).cyan()
         );
-        AudioPlayer::play_song(&sequence, &AudioConfig::default())?;
-    } else if via_sequence && extension.eq_ignore_ascii_case("ym") {
-        let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
         let ym_data = fs::read(input)?;
-        let (mut sequence, _) = with_spinner("Decoding YM via YmSequence pipeline...", || {
-            YmSequence::from_ym_data(name, &ym_data, None, None)
-        })?;
+        AudioPlayer::play_ym_data(&ym_data, &AudioConfig::default())?;
+    } else {
+        let mut sequence = YmSequence::load_from_path(input, None, None)?;
         if let Some(hz_override) = hz {
             sequence.timing.frame_rate = HzOption::from(hz_override).into();
         }
@@ -663,14 +548,6 @@ fn run_song_play(
             sequence.timing.frame_rate.hz_value()
         );
         AudioPlayer::play_song(&sequence, &AudioConfig::default())?;
-    } else {
-        println!(
-            "{} {}...",
-            style("LOADING:").bold().cyan(),
-            style(input.display()).cyan()
-        );
-        let ym_data = fs::read(input)?;
-        AudioPlayer::play_ym_data(&ym_data, &AudioConfig::default())?;
     }
 
     Ok(())
@@ -691,7 +568,7 @@ fn run_sfx_render(
         style("LOADING SFX:").bold().cyan(),
         style(args.input.display()).cyan()
     );
-    let mut sequence = load_sfx(&args.input, args.index)?;
+    let mut sequence = SfxSequence::load_from_path(&args.input, args.index)?;
     if let Some(c) = args.clock {
         sequence.source_clock = c;
     }
@@ -699,12 +576,12 @@ fn run_sfx_render(
         sequence.source_hz = SystemHz::from(HzOption::from(hz_override)).hz_value();
     }
 
-    let compiler = DeltaCompiler::new();
-    let binary = compiler.compile_sfx(&sequence);
+    let yfx_file = YfxFile::from_sequence(&sequence);
+    let binary = yfx_file.to_bytes();
 
     fs::write(&output_path, &binary)?;
 
-    let (delay_y, delay_x) = ym_core::calculate_delay(sequence.source_hz);
+    let (delay_y, delay_x) = SystemHz::calculate_delay_for_hz(sequence.source_hz);
     let yfi_path = output_path.with_extension("yfi");
     let yfi_contents = format!(
         "; ca65 include generated by lym for {}\n\
@@ -735,7 +612,7 @@ fn run_sfx_render(
 }
 
 fn run_sfx_play(args: &SfxCommonArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut sequence = load_sfx(&args.input, args.index)?;
+    let mut sequence = SfxSequence::load_from_path(&args.input, args.index)?;
     if let Some(c) = args.clock {
         sequence.source_clock = c;
     }
@@ -766,13 +643,13 @@ fn run_mix(
         style("LOADING SONG:").bold().cyan(),
         style(song.display()).cyan()
     );
-    let mut song_seq = load_song(song, clock, target_clock)?;
+    let mut song_seq = YmSequence::load_from_path(song, clock, target_clock)?;
 
     println!(
         "{} Loading sound effect bank...",
         style("LOADING SFX:").bold().cyan()
     );
-    let sfx_list = load_all_sfx(sfx)?;
+    let sfx_list = SfxSequence::load_all_from_paths(sfx)?;
     println!(
         "{} Loaded {} sound effect(s).",
         style("SFX BANK READY:").bold().green(),

@@ -9,7 +9,7 @@ interactively mix their entire soundtrack directly on their PC workstation:
 1. **Multi-Format Ingestion**: Convert hand-authored `.json`, visual AYFX `.csv` exports, binary `.afx` effects, or
    multi-effect `.afb` banks into optimized 5-byte fixed-width `.yfx` VBI overrides.
 2. **16-Bit $\rightarrow$ 8-Bit Chiptune Conversion**: Pre-compile complex Atari ST `.ym` tracks into low-CPU-overhead
-   `.ysg` streams, offloading all pitch scaling, envelope calculations, and 16-bit delta bitmasking at build time.
+   `.ysg` streams, offloading all pitch scaling, envelope calculations, and channel-split opcode streaming at build time.
 3. **Desktop Audition & Live Keyboard Mixing**: Preview songs and sound effects through cycle-accurate YM2149 emulation
    and `cpal` speakers, interactive key-triggering (`1`–`9`, `0`, `SPACE`) to test channel takeover and priority
    arbitration live before writing a single line of target assembly.
@@ -18,12 +18,14 @@ interactively mix their entire soundtrack directly on their PC workstation:
 
 * **Music**:
     * `.ym` (Atari ST YM5/YM6 register dumps) via `ym2149-ym-replayer`.
+    * `.ysg` (Compiled channel-split target binary) via `YsgFile`.
     * `.json` (Hand-authored music sequence source files).
 * **Sound Effects (SFX)**:
     * `.json` (Hand-authored sequence source files).
     * `.csv` (AYFXedit active-high columns visual export).
     * `.afx` (Single AYFX binary effect file).
     * `.afb` (Multi-effect binary sound bank).
+    * `.yfx` (Compiled 5-byte target sound effect binary).
 
 ---
 
@@ -32,9 +34,11 @@ interactively mix their entire soundtrack directly on their PC workstation:
 Audio assets are compiled into custom target formats (`.ysg` for songs, `.yfx` for sound effects) to fit within
 cartridge ROM space constraints and execute within a minimal 6502 CPU cycle budget.
 
-* **Music Format (`.ysg`)**: Uses a 14-byte fixed header, sequence index table, pattern offset pointers, and
-  pattern-deduplicated delta-mask frame streams. The first frame of every pattern block is fully loaded (`0x3FFF` mask),
-  guaranteeing $O (1)$ pattern seeking, looping, and clean SFX recovery.
+* **Music Format (`.ysg`)**: Uses a 20-byte fixed header, four decoupled track streams (Voice A, Voice B, Voice C,
+  and Global), sequence index tables, 16-bit relative pattern offset pointers, and run-length idle frame tokens
+  (`0bbbbbbb`). Empty pattern blocks are referenced using the `$FF` sequence sentinel byte to avoid storing empty
+  bytes, and all channel Tone and Noise enables are precomputed at build time into the Global track's R7 mixer updates.
+  The target 6502 replayer maintains an ultra-compact 14-byte Zero-Page playback state (`TYsgPlayerState`).
 * **Sound Effects Format (`.yfx`)**: Uses a 5-byte fixed-width frame representation (`PitchLow`, `PitchHigh`, `Volume`,
   `Control`, `Duration`), allowing rapid VBI channel overrides without variable-length parsing overhead.
 
@@ -97,7 +101,7 @@ ensuring seamless resume when a sound effect ends.
 
 ## Rust Workspace & Crates Selected
 
-We have selected the following crates to form the core of our workspace:
+We have selected the following crates and module structures to form the core of our workspace:
 
 * **`ym2149-rs` (slippyex workspace)**: Modular chiptune emulation and parsing stack.
     * `ym2149`: Core cycle-accurate PSG chip emulation.
@@ -106,6 +110,21 @@ We have selected the following crates to form the core of our workspace:
   a pure rendering engine with no device/OS dependencies.
 * **`serde` & `serde_json`**: For parsing hand-authored `.json` sound effect and song sequence sources.
 * AYFX `.csv` parsing is hand-rolled rather than via a dedicated `csv` crate.
+
+### Trait & File Format Architecture (`ym-core`)
+
+The core library decouples format ingestion, optimization, and serialization via explicit traits:
+
+* **Music Traits**:
+    * `SongInput`: Implemented by `YmFile` (Atari ST YM5/YM6) and `YsgFile` (target binary). Decodes files into a unified `YmSequence`.
+    * `SongFile`: Implemented by `YsgFile`. Compiles a `YmSequence` into a 4-track channel-split payload and serializes to disk.
+* **SFX Traits**:
+    * `SfxInput`: Implemented by `AyfxFile` (`.afx`, `.afb`, `.csv`) and `YfxFile` (`.yfx`). Decodes sound effects into `SfxSequence`.
+    * `SfxFile`: Implemented by `YfxFile`. Compiles an `SfxSequence` into 5-byte fixed-width VBI frames and writes to disk.
+* **Software PSG Renderers (`ym-core/src/player.rs`)**:
+    * `YmSongRenderer`: Streams frames to an emulated `Ym2149` chip instance and outputs PCM audio buffers.
+    * `YmSfxRenderer`: Renders isolated sound effects across selected channels.
+    * `YmMixer`: Real-time interactive multi-channel mixer supporting dynamic SFX triggering, voice takeover, and conflict resolution.
 
 ---
 
@@ -123,8 +142,7 @@ suites:
     * Directly parse `.ym` files (including LHA compressed sources) and `.ysg` streams.
     * Apply compile-time pitch-scaling via `--target-clock` (e.g. Atari ST 2.0MHz $\rightarrow$ 7800 1.789773MHz,
       or $\rightarrow$ Apple II Mockingboard ~1.02MHz) and temporal resampling/decimation (`--step`).
-    * Implement **Pattern-based Delta Masking**, RLE idle-run tokens, and sequence packing (`.ysg` and `.ysi` ca65
-      include headers).
+    * Implement **Channel-Split Pattern Compression**, 4-track decoupled encoding (Voices A, B, C, Global), RLE idle-run tokens, sequence packing, and optimal candidate exploration (`--pattern-frames`) producing `.ysg` binaries and `.ysi` ca65 include headers.
     * Real-time interactive multi-channel song & SFX keyboard mixer with 10 key slots (`1`–`9`, `0`, `SPACE`),
       polyphonic channel fallback, and arrow-key seeking (`←`/`→`).
 

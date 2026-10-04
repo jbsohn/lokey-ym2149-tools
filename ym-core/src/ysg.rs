@@ -1,5 +1,6 @@
 use crate::sequence::{YmFrame, YmSequence};
 use crate::timing::{SystemHz, TimingConfig};
+use crate::traits::SongFile;
 
 /// The fixed size in bytes of the YSG container header.
 pub const YSG_HEADER_SIZE: usize = 20;
@@ -7,15 +8,8 @@ pub const YSG_HEADER_SIZE: usize = 20;
 /// Magic bytes identifying a YSG binary stream ("YS").
 pub const YSG_MAGIC: [u8; 2] = *b"YS";
 
-/// Legacy magic bytes identifying a temporary YCS stream ("YC").
-pub const YCS_MAGIC: [u8; 2] = *b"YC";
-
 /// Current YSG container version.
 pub const YSG_VERSION: u8 = 0x01;
-
-/// Backwards compatibility constants for YCS.
-pub const YCS_HEADER_SIZE: usize = YSG_HEADER_SIZE;
-pub const YCS_VERSION: u8 = YSG_VERSION;
 
 /// Sentinel sequence table value indicating an entirely silent/empty pattern.
 pub const SENTINEL_EMPTY_PATTERN: u8 = 0xFF;
@@ -33,8 +27,6 @@ pub struct YsgHeader {
     pub offset_track_c: u16,
     pub offset_track_global: u16,
 }
-
-pub type YcsHeader = YsgHeader;
 
 impl YsgHeader {
     /// Serializes the header into its 20-byte binary representation.
@@ -73,17 +65,19 @@ impl YsgHeader {
 
         bytes
     }
+}
 
-    /// Deserializes a header from a byte slice.
-    ///
-    /// # Errors
-    /// Returns an error if the slice is too short, magic doesn't match, or version is unsupported.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+impl TryFrom<&[u8]> for YsgHeader {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if bytes.len() < YSG_HEADER_SIZE {
             return Err("YSG file truncated before header completed".into());
         }
-        if bytes[0..2] != YSG_MAGIC && bytes[0..2] != YCS_MAGIC {
-            return Err(format!("Invalid YSG magic: expected 'YS' or 'YC', found {:?}", &bytes[0..2]).into());
+        if bytes[0..2] != YSG_MAGIC {
+            return Err(
+                format!("Invalid YSG magic: expected 'YS', found {:?}", &bytes[0..2]).into(),
+            );
         }
         if bytes[2] != YSG_VERSION {
             return Err(format!("Unsupported YSG version: {}", bytes[2]).into());
@@ -113,12 +107,41 @@ impl YsgHeader {
     }
 }
 
+impl YsgHeader {
+    /// Deserializes a header from a byte slice.
+    ///
+    /// # Errors
+    /// Returns an error if the slice is too short, magic doesn't match, or version is unsupported.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::try_from(bytes)
+    }
+}
+
 /// Intermediate per-frame state for a single voice (Channel A, B, or C).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VoiceFrame {
     pub period: u16,
     pub volume: u8,
     pub envelope_mode: bool,
+}
+
+impl VoiceFrame {
+    /// Encodes a slice of voice frames for a pattern chunk into compressed opcode bytes.
+    #[must_use]
+    pub fn encode_pattern(frames: &[Self]) -> Vec<u8> {
+        encode_voice_pattern(frames)
+    }
+
+    /// Decodes a stream of voice opcode bytes into intermediate voice frames.
+    ///
+    /// # Errors
+    /// Returns an error if the opcode stream is malformed or truncated.
+    pub fn decode_stream(
+        bytes: &[u8],
+        frame_count: usize,
+    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+        decode_voice_stream(bytes, frame_count)
+    }
 }
 
 /// Intermediate per-frame state for the global PSG subsystem (Noise, Mixer, Envelope).
@@ -128,6 +151,25 @@ pub struct GlobalFrame {
     pub mixer: u8,
     pub envelope_period: u16,
     pub envelope_shape: Option<u8>,
+}
+
+impl GlobalFrame {
+    /// Encodes a slice of global frames for a pattern chunk into compressed opcode bytes.
+    #[must_use]
+    pub fn encode_pattern(frames: &[Self]) -> Vec<u8> {
+        encode_global_pattern(frames)
+    }
+
+    /// Decodes a stream of global opcode bytes into intermediate global frames.
+    ///
+    /// # Errors
+    /// Returns an error if the opcode stream is malformed or truncated.
+    pub fn decode_stream(
+        bytes: &[u8],
+        frame_count: usize,
+    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+        decode_global_stream(bytes, frame_count)
+    }
 }
 
 impl Default for GlobalFrame {
@@ -143,7 +185,14 @@ impl Default for GlobalFrame {
 
 /// Decomposes a slice of high-level [`YmFrame`] records into 4 parallel tracks.
 #[must_use]
-pub fn decompose_frames(frames: &[YmFrame]) -> (Vec<VoiceFrame>, Vec<VoiceFrame>, Vec<VoiceFrame>, Vec<GlobalFrame>) {
+pub fn decompose_frames(
+    frames: &[YmFrame],
+) -> (
+    Vec<VoiceFrame>,
+    Vec<VoiceFrame>,
+    Vec<VoiceFrame>,
+    Vec<GlobalFrame>,
+) {
     let mut track_a = Vec::with_capacity(frames.len());
     let mut track_b = Vec::with_capacity(frames.len());
     let mut track_c = Vec::with_capacity(frames.len());
@@ -196,22 +245,46 @@ pub fn decompose_frames(frames: &[YmFrame]) -> (Vec<VoiceFrame>, Vec<VoiceFrame>
         // Bit 3: Noise A, Bit 4: Noise B, Bit 5: Noise C
         let mut mixer = state_glob.mixer;
         if let Some(te) = frame.tone_enable_a {
-            if te { mixer &= !0x01; } else { mixer |= 0x01; }
+            if te {
+                mixer &= !0x01;
+            } else {
+                mixer |= 0x01;
+            }
         }
         if let Some(te) = frame.tone_enable_b {
-            if te { mixer &= !0x02; } else { mixer |= 0x02; }
+            if te {
+                mixer &= !0x02;
+            } else {
+                mixer |= 0x02;
+            }
         }
         if let Some(te) = frame.tone_enable_c {
-            if te { mixer &= !0x04; } else { mixer |= 0x04; }
+            if te {
+                mixer &= !0x04;
+            } else {
+                mixer |= 0x04;
+            }
         }
         if let Some(ne) = frame.noise_enable_a {
-            if ne { mixer &= !0x08; } else { mixer |= 0x08; }
+            if ne {
+                mixer &= !0x08;
+            } else {
+                mixer |= 0x08;
+            }
         }
         if let Some(ne) = frame.noise_enable_b {
-            if ne { mixer &= !0x10; } else { mixer |= 0x10; }
+            if ne {
+                mixer &= !0x10;
+            } else {
+                mixer |= 0x10;
+            }
         }
         if let Some(ne) = frame.noise_enable_c {
-            if ne { mixer &= !0x20; } else { mixer |= 0x20; }
+            if ne {
+                mixer &= !0x20;
+            } else {
+                mixer |= 0x20;
+            }
         }
         state_glob.mixer = mixer;
 
@@ -291,17 +364,18 @@ pub fn encode_voice_pattern(frames: &[VoiceFrame]) -> Vec<u8> {
             continue;
         }
 
-        let (lsb_changed, msb_changed) = if !pitch_initialized && (current.volume > 0 || current.envelope_mode) {
-            pitch_initialized = true;
-            (true, true)
-        } else if current.volume == 0 && !current.envelope_mode {
-            // Channel is silent: pitch does not need to be updated while volume is 0
-            (false, false)
-        } else {
-            let lsb = (current.period & 0xFF) != (prev_frame.period & 0xFF);
-            let msb = ((current.period >> 8) & 0x0F) != ((prev_frame.period >> 8) & 0x0F);
-            (lsb, msb)
-        };
+        let (lsb_changed, msb_changed) =
+            if !pitch_initialized && (current.volume > 0 || current.envelope_mode) {
+                pitch_initialized = true;
+                (true, true)
+            } else if current.volume == 0 && !current.envelope_mode {
+                // Channel is silent: pitch does not need to be updated while volume is 0
+                (false, false)
+            } else {
+                let lsb = (current.period & 0xFF) != (prev_frame.period & 0xFF);
+                let msb = ((current.period >> 8) & 0x0F) != ((prev_frame.period >> 8) & 0x0F);
+                (lsb, msb)
+            };
 
         let mut opcode = 0x80u8; // Bit 7 = 1 (active)
         if lsb_changed {
@@ -340,7 +414,10 @@ pub fn encode_voice_pattern(frames: &[VoiceFrame]) -> Vec<u8> {
 ///
 /// # Errors
 /// Returns an error if the byte stream is truncated or malformed.
-pub fn decode_voice_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<VoiceFrame>, Box<dyn std::error::Error>> {
+pub fn decode_voice_stream(
+    bytes: &[u8],
+    frame_count: usize,
+) -> Result<Vec<VoiceFrame>, Box<dyn std::error::Error>> {
     let mut frames = Vec::with_capacity(frame_count);
     let mut current = VoiceFrame::default();
     let mut pp = 0;
@@ -408,6 +485,7 @@ pub fn decode_voice_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<Voice
 /// - If noise or hardware envelope are active in this pattern, their initial
 ///   parameters are explicitly established.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn encode_global_pattern(frames: &[GlobalFrame]) -> Vec<u8> {
     let mut output = Vec::new();
     let pat_len = frames.len();
@@ -429,18 +507,38 @@ pub fn encode_global_pattern(frames: &[GlobalFrame]) -> Vec<u8> {
     let r13_retrigger = f0.envelope_shape.is_some();
 
     let mut mask0 = 0x80u8;
-    if r6_write { mask0 |= 0x01; }
-    if r7_write { mask0 |= 0x02; }
-    if r11_write { mask0 |= 0x04; }
-    if r12_write { mask0 |= 0x08; }
-    if r13_retrigger { mask0 |= 0x10; }
+    if r6_write {
+        mask0 |= 0x01;
+    }
+    if r7_write {
+        mask0 |= 0x02;
+    }
+    if r11_write {
+        mask0 |= 0x04;
+    }
+    if r12_write {
+        mask0 |= 0x08;
+    }
+    if r13_retrigger {
+        mask0 |= 0x10;
+    }
 
     output.push(mask0);
-    if r6_write { output.push(f0.noise_period & 0x1F); }
-    if r7_write { output.push(f0.mixer); }
-    if r11_write { output.push((f0.envelope_period & 0xFF) as u8); }
-    if r12_write { output.push(((f0.envelope_period >> 8) & 0xFF) as u8); }
-    if let Some(shape) = f0.envelope_shape { output.push(shape & 0x0F); }
+    if r6_write {
+        output.push(f0.noise_period & 0x1F);
+    }
+    if r7_write {
+        output.push(f0.mixer);
+    }
+    if r11_write {
+        output.push((f0.envelope_period & 0xFF) as u8);
+    }
+    if r12_write {
+        output.push(((f0.envelope_period >> 8) & 0xFF) as u8);
+    }
+    if let Some(shape) = f0.envelope_shape {
+        output.push(shape & 0x0F);
+    }
 
     let mut prev_frame = f0;
     prev_frame.envelope_shape = None;
@@ -490,8 +588,11 @@ pub fn encode_global_pattern(frames: &[GlobalFrame]) -> Vec<u8> {
 
         let r6_changed = force_noise || (current.noise_period != prev_frame.noise_period);
         let r7_changed = current.mixer != prev_frame.mixer;
-        let r11_changed = force_env || ((current.envelope_period & 0xFF) != (prev_frame.envelope_period & 0xFF));
-        let r12_changed = force_env || (((current.envelope_period >> 8) & 0xFF) != ((prev_frame.envelope_period >> 8) & 0xFF));
+        let r11_changed =
+            force_env || ((current.envelope_period & 0xFF) != (prev_frame.envelope_period & 0xFF));
+        let r12_changed = force_env
+            || (((current.envelope_period >> 8) & 0xFF)
+                != ((prev_frame.envelope_period >> 8) & 0xFF));
         let r13_retrigger = current.envelope_shape.is_some();
 
         if noise_active {
@@ -502,18 +603,38 @@ pub fn encode_global_pattern(frames: &[GlobalFrame]) -> Vec<u8> {
         }
 
         let mut mask = 0x80u8;
-        if r6_changed { mask |= 0x01; }
-        if r7_changed { mask |= 0x02; }
-        if r11_changed { mask |= 0x04; }
-        if r12_changed { mask |= 0x08; }
-        if r13_retrigger { mask |= 0x10; }
+        if r6_changed {
+            mask |= 0x01;
+        }
+        if r7_changed {
+            mask |= 0x02;
+        }
+        if r11_changed {
+            mask |= 0x04;
+        }
+        if r12_changed {
+            mask |= 0x08;
+        }
+        if r13_retrigger {
+            mask |= 0x10;
+        }
 
         output.push(mask);
-        if r6_changed { output.push(current.noise_period & 0x1F); }
-        if r7_changed { output.push(current.mixer); }
-        if r11_changed { output.push((current.envelope_period & 0xFF) as u8); }
-        if r12_changed { output.push(((current.envelope_period >> 8) & 0xFF) as u8); }
-        if let Some(shape) = current.envelope_shape { output.push(shape & 0x0F); }
+        if r6_changed {
+            output.push(current.noise_period & 0x1F);
+        }
+        if r7_changed {
+            output.push(current.mixer);
+        }
+        if r11_changed {
+            output.push((current.envelope_period & 0xFF) as u8);
+        }
+        if r12_changed {
+            output.push(((current.envelope_period >> 8) & 0xFF) as u8);
+        }
+        if let Some(shape) = current.envelope_shape {
+            output.push(shape & 0x0F);
+        }
 
         prev_frame = current;
         prev_frame.envelope_shape = None;
@@ -527,7 +648,10 @@ pub fn encode_global_pattern(frames: &[GlobalFrame]) -> Vec<u8> {
 ///
 /// # Errors
 /// Returns an error if the byte stream is truncated or malformed.
-pub fn decode_global_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<GlobalFrame>, Box<dyn std::error::Error>> {
+pub fn decode_global_stream(
+    bytes: &[u8],
+    frame_count: usize,
+) -> Result<Vec<GlobalFrame>, Box<dyn std::error::Error>> {
     let mut frames = Vec::with_capacity(frame_count);
     let mut current = GlobalFrame::default();
     let mut pp = 0;
@@ -560,29 +684,39 @@ pub fn decode_global_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<Glob
         let r13_retrigger = (b & 0x10) != 0;
 
         if r6_changed {
-            if pp >= bytes.len() { return Err("Missing R6 payload in global stream".into()); }
+            if pp >= bytes.len() {
+                return Err("Missing R6 payload in global stream".into());
+            }
             current.noise_period = bytes[pp] & 0x1F;
             pp += 1;
         }
         if r7_changed {
-            if pp >= bytes.len() { return Err("Missing R7 payload in global stream".into()); }
+            if pp >= bytes.len() {
+                return Err("Missing R7 payload in global stream".into());
+            }
             current.mixer = bytes[pp];
             pp += 1;
         }
         if r11_changed {
-            if pp >= bytes.len() { return Err("Missing R11 payload in global stream".into()); }
+            if pp >= bytes.len() {
+                return Err("Missing R11 payload in global stream".into());
+            }
             let lsb = u16::from(bytes[pp]);
             pp += 1;
             current.envelope_period = (current.envelope_period & 0xFF00) | lsb;
         }
         if r12_changed {
-            if pp >= bytes.len() { return Err("Missing R12 payload in global stream".into()); }
+            if pp >= bytes.len() {
+                return Err("Missing R12 payload in global stream".into());
+            }
             let msb = u16::from(bytes[pp]);
             pp += 1;
             current.envelope_period = (current.envelope_period & 0x00FF) | (msb << 8);
         }
         if r13_retrigger {
-            if pp >= bytes.len() { return Err("Missing R13 payload in global stream".into()); }
+            if pp >= bytes.len() {
+                return Err("Missing R13 payload in global stream".into());
+            }
             current.envelope_shape = Some(bytes[pp] & 0x0F);
             pp += 1;
         } else {
@@ -596,14 +730,37 @@ pub fn decode_global_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<Glob
 }
 
 /// A serialized descriptor for a single track (Voice A, B, C, or Global).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrackDescriptor {
     pub unique_patterns: Vec<Vec<u8>>,
     pub sequence_table: Vec<u8>,
 }
 
 impl TrackDescriptor {
-    /// Serializes this track descriptor into bytes matching the YCS specification.
+    /// Appends an empty/silent pattern sentinel (0xFF) to the sequence table.
+    pub fn push_empty_pattern(&mut self) {
+        self.sequence_table.push(SENTINEL_EMPTY_PATTERN);
+    }
+
+    /// Appends a pattern payload to the track, deduplicating against existing unique patterns.
+    ///
+    /// # Errors
+    /// Returns an error if the track exceeds the 255 unique pattern limit (0xFF is reserved for silent patterns).
+    pub fn push_pattern(&mut self, pat_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(idx) = self.unique_patterns.iter().position(|p| p == &pat_bytes) {
+            self.sequence_table.push(idx as u8);
+        } else {
+            if self.unique_patterns.len() >= 0xFF {
+                return Err("Track exceeds maximum of 255 unique patterns".into());
+            }
+            let idx = self.unique_patterns.len() as u8;
+            self.unique_patterns.push(pat_bytes);
+            self.sequence_table.push(idx);
+        }
+        Ok(())
+    }
+
+    /// Serializes this track descriptor into bytes matching the YSG specification.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let p = self.unique_patterns.len();
@@ -696,164 +853,437 @@ pub struct YsgSongDetails {
     pub track_global_bytes: usize,
 }
 
-pub type YcsSongDetails = YsgSongDetails;
+impl TrackDescriptor {
+    /// Builds a track descriptor from voice frames, chunked by `pattern_frames` and deduplicated.
+    ///
+    /// # Errors
+    /// Returns an error if the track exceeds 254 unique patterns.
+    pub fn from_voice_frames(
+        frames: &[VoiceFrame],
+        pattern_frames: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut track = Self::default();
 
-/// Helper function to chunk and deduplicate a voice track into a [`TrackDescriptor`].
-fn build_voice_track_descriptor(frames: &[VoiceFrame], pattern_frames: usize) -> Result<TrackDescriptor, Box<dyn std::error::Error>> {
-    let mut unique_patterns: Vec<Vec<u8>> = Vec::new();
-    let mut sequence_table: Vec<u8> = Vec::new();
-
-    for chunk in frames.chunks(pattern_frames) {
-        let is_silent = chunk.iter().all(|f| f.volume == 0 && !f.envelope_mode);
-        if is_silent {
-            sequence_table.push(SENTINEL_EMPTY_PATTERN);
-        } else {
-            let pat_bytes = encode_voice_pattern(chunk);
-            if let Some(idx) = unique_patterns.iter().position(|p| p == &pat_bytes) {
-                sequence_table.push(idx as u8);
+        for chunk in frames.chunks(pattern_frames) {
+            let is_silent = chunk.iter().all(|f| f.volume == 0 && !f.envelope_mode);
+            if is_silent {
+                track.push_empty_pattern();
             } else {
-                if unique_patterns.len() >= 0xFF {
-                    return Err("Track exceeds maximum of 254 unique patterns".into());
+                track.push_pattern(VoiceFrame::encode_pattern(chunk))?;
+            }
+        }
+
+        Ok(track)
+    }
+
+    /// Builds a track descriptor from global frames, chunked by `pattern_frames` and deduplicated.
+    ///
+    /// # Errors
+    /// Returns an error if the track exceeds 254 unique patterns.
+    pub fn from_global_frames(
+        frames: &[GlobalFrame],
+        pattern_frames: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut track = Self::default();
+
+        for chunk in frames.chunks(pattern_frames) {
+            track.push_pattern(GlobalFrame::encode_pattern(chunk))?;
+        }
+
+        Ok(track)
+    }
+}
+
+/// Represents a compiled, relocatable YSG (YM Song) binary container.
+///
+/// Encapsulates the 20-byte container header and the four decoupled track descriptors
+/// (Voices A, B, C, and Global).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YsgFile {
+    pub header: YsgHeader,
+    pub track_a: TrackDescriptor,
+    pub track_b: TrackDescriptor,
+    pub track_c: TrackDescriptor,
+    pub track_global: TrackDescriptor,
+}
+
+impl TryFrom<&[u8]> for YsgFile {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let header = YsgHeader::from_bytes(bytes)?;
+        let seq_len = header.seq_len as usize;
+
+        let off_a = header.offset_track_a as usize;
+        let off_b = header.offset_track_b as usize;
+        let off_c = header.offset_track_c as usize;
+        let off_glob = header.offset_track_global as usize;
+
+        if off_a > off_b || off_b > off_c || off_c > off_glob || off_glob > bytes.len() {
+            return Err("Invalid track offsets in YSG header".into());
+        }
+
+        let track_a = TrackDescriptor::from_bytes(&bytes[off_a..off_b], seq_len)?;
+        let track_b = TrackDescriptor::from_bytes(&bytes[off_b..off_c], seq_len)?;
+        let track_c = TrackDescriptor::from_bytes(&bytes[off_c..off_glob], seq_len)?;
+        let track_global = TrackDescriptor::from_bytes(&bytes[off_glob..bytes.len()], seq_len)?;
+
+        Ok(Self {
+            header,
+            track_a,
+            track_b,
+            track_c,
+            track_global,
+        })
+    }
+}
+
+impl YsgFile {
+    /// Deserializes and validates a YSG binary container from raw bytes.
+    ///
+    /// # Errors
+    /// Returns an error if the container is truncated, magic is invalid, or track offsets
+    /// and descriptors are malformed.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::try_from(bytes)
+    }
+
+    /// Compiles an uncompressed [`YmSequence`] into a structured `YsgFile` container.
+    ///
+    /// # Errors
+    /// Returns an error if the sequence is empty, exceeds 255 pattern steps, or unique
+    /// pattern limits are exceeded.
+    #[allow(clippy::similar_names)]
+    pub fn from_sequence(
+        song: &YmSequence,
+        pattern_frames: u8,
+    ) -> Result<(Self, YsgSongDetails), Box<dyn std::error::Error>> {
+        if pattern_frames == 0 {
+            return Err("Pattern frames must be greater than zero".into());
+        }
+        if song.frames.is_empty() {
+            return Err("Cannot compile empty song sequence".into());
+        }
+
+        let pat_len = pattern_frames as usize;
+        let padded_len = song.frames.len().next_multiple_of(pat_len);
+        let mut padded_frames = song.frames.clone();
+        padded_frames.resize(
+            padded_len,
+            YmFrame {
+                volume_a: Some(0),
+                volume_b: Some(0),
+                volume_c: Some(0),
+                ..Default::default()
+            },
+        );
+
+        let seq_len = padded_len / pat_len;
+        if seq_len > 255 {
+            return Err(
+                format!("Song length ({seq_len} patterns) exceeds maximum 255 steps").into(),
+            );
+        }
+
+        let (track_a_frames, track_b_frames, track_c_frames, track_glob_frames) =
+            decompose_frames(&padded_frames);
+
+        let track_a = TrackDescriptor::from_voice_frames(&track_a_frames, pat_len)?;
+        let track_b = TrackDescriptor::from_voice_frames(&track_b_frames, pat_len)?;
+        let track_c = TrackDescriptor::from_voice_frames(&track_c_frames, pat_len)?;
+        let track_global = TrackDescriptor::from_global_frames(&track_glob_frames, pat_len)?;
+
+        let bytes_a = track_a.to_bytes();
+        let bytes_b = track_b.to_bytes();
+        let bytes_c = track_c.to_bytes();
+        let bytes_glob = track_global.to_bytes();
+
+        let off_a = YSG_HEADER_SIZE as u16;
+        let off_b = off_a + bytes_a.len() as u16;
+        let off_c = off_b + bytes_b.len() as u16;
+        let off_glob = off_c + bytes_c.len() as u16;
+
+        let loop_step = match song.loop_start {
+            Some(frame) => {
+                let step = frame / pat_len;
+                if step < seq_len && step < 255 {
+                    step as u8
+                } else {
+                    255
                 }
-                let idx = unique_patterns.len() as u8;
-                unique_patterns.push(pat_bytes);
-                sequence_table.push(idx);
             }
-        }
+            None => 255,
+        };
+
+        let header = YsgHeader {
+            pattern_frames,
+            seq_len: seq_len as u8,
+            loop_step,
+            frame_rate_hz: song.timing.frame_rate.hz_value() as u16,
+            master_clock_hz: song.timing.master_clock_hz,
+            offset_track_a: off_a,
+            offset_track_b: off_b,
+            offset_track_c: off_c,
+            offset_track_global: off_glob,
+        };
+
+        let file = Self {
+            header,
+            track_a,
+            track_b,
+            track_c,
+            track_global,
+        };
+
+        let details = YsgSongDetails {
+            bytes: file.to_bytes(),
+            pattern_frames,
+            seq_len: seq_len as u8,
+            unique_patterns_a: file.track_a.unique_patterns.len(),
+            unique_patterns_b: file.track_b.unique_patterns.len(),
+            unique_patterns_c: file.track_c.unique_patterns.len(),
+            unique_patterns_global: file.track_global.unique_patterns.len(),
+            track_a_bytes: bytes_a.len(),
+            track_b_bytes: bytes_b.len(),
+            track_c_bytes: bytes_c.len(),
+            track_global_bytes: bytes_glob.len(),
+        };
+
+        Ok((file, details))
     }
 
-    Ok(TrackDescriptor {
-        unique_patterns,
-        sequence_table,
-    })
+    /// Automatically finds the optimal pattern frame size that yields the smallest
+    /// total compressed YSG binary size, returning the constructed `YsgFile` and details.
+    ///
+    /// # Errors
+    /// Returns an error if no valid pattern frame size can compress the song.
+    pub fn from_sequence_optimal(
+        song: &YmSequence,
+    ) -> Result<(Self, YsgSongDetails), Box<dyn std::error::Error>> {
+        let mut best: Option<(Self, YsgSongDetails)> = None;
+
+        for &pf in CANDIDATE_PATTERN_FRAMES {
+            let pat_len = pf as usize;
+            let padded_len = song.frames.len().next_multiple_of(pat_len);
+            let seq_len = padded_len / pat_len;
+            if seq_len > 255 {
+                continue;
+            }
+
+            if let Ok((file, details)) = Self::from_sequence(song, pf) {
+                if let Some((_, ref current_best_details)) = best {
+                    if details.bytes.len() < current_best_details.bytes.len() {
+                        best = Some((file, details));
+                    }
+                } else {
+                    best = Some((file, details));
+                }
+            }
+        }
+
+        best.ok_or_else(|| {
+            "Could not find a valid pattern size fitting sequence length limits".into()
+        })
+    }
+
+    /// Compiles a [`YmSequence`] into a [`YsgSongDetails`] payload using the specified pattern size.
+    ///
+    /// # Errors
+    /// Returns an error if compression fails or pattern size limits are exceeded.
+    pub fn compile(
+        song: &YmSequence,
+        pattern_frames: u8,
+    ) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+        Self::from_sequence(song, pattern_frames).map(|(_, details)| details)
+    }
+
+    /// Compiles a [`YmSequence`] into a [`YsgSongDetails`] payload, finding the optimal pattern size.
+    ///
+    /// # Errors
+    /// Returns an error if no valid pattern size can compress the song.
+    pub fn compile_optimal(
+        song: &YmSequence,
+    ) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+        Self::from_sequence_optimal(song).map(|(_, details)| details)
+    }
+
+    /// Decompiles a raw `.ysg` binary byte slice into a high-level [`YmSequence`].
+    ///
+    /// # Errors
+    /// Returns an error if the container header or track descriptors are malformed.
+    pub fn decompile(name: &str, bytes: &[u8]) -> Result<YmSequence, Box<dyn std::error::Error>> {
+        let file = Self::from_bytes(bytes)?;
+        file.to_sequence(name)
+    }
 }
 
-/// Helper function to chunk and deduplicate the global track into a [`TrackDescriptor`].
-fn build_global_track_descriptor(frames: &[GlobalFrame], pattern_frames: usize) -> Result<TrackDescriptor, Box<dyn std::error::Error>> {
-    let mut unique_patterns: Vec<Vec<u8>> = Vec::new();
-    let mut sequence_table: Vec<u8> = Vec::new();
+impl SongFile for YsgFile {
+    fn to_bytes(&self) -> Vec<u8> {
+        let bytes_a = self.track_a.to_bytes();
+        let bytes_b = self.track_b.to_bytes();
+        let bytes_c = self.track_c.to_bytes();
+        let bytes_glob = self.track_global.to_bytes();
 
-    for chunk in frames.chunks(pattern_frames) {
-        let pat_bytes = encode_global_pattern(chunk);
-        if let Some(idx) = unique_patterns.iter().position(|p| p == &pat_bytes) {
-            sequence_table.push(idx as u8);
+        let off_a = YSG_HEADER_SIZE as u16;
+        let off_b = off_a + bytes_a.len() as u16;
+        let off_c = off_b + bytes_b.len() as u16;
+        let off_glob = off_c + bytes_c.len() as u16;
+
+        let mut header = self.header.clone();
+        header.offset_track_a = off_a;
+        header.offset_track_b = off_b;
+        header.offset_track_c = off_c;
+        header.offset_track_global = off_glob;
+
+        let mut out = Vec::with_capacity(
+            YSG_HEADER_SIZE + bytes_a.len() + bytes_b.len() + bytes_c.len() + bytes_glob.len(),
+        );
+        out.extend_from_slice(&header.to_bytes());
+        out.extend_from_slice(&bytes_a);
+        out.extend_from_slice(&bytes_b);
+        out.extend_from_slice(&bytes_c);
+        out.extend_from_slice(&bytes_glob);
+        out
+    }
+
+    fn frame_rate_hz(&self) -> u16 {
+        self.header.frame_rate_hz
+    }
+
+    fn master_clock_hz(&self) -> u32 {
+        self.header.master_clock_hz
+    }
+
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
+    fn to_sequence(&self, name: &str) -> Result<YmSequence, Box<dyn std::error::Error>> {
+        let seq_len = self.header.seq_len as usize;
+        let pat_len = self.header.pattern_frames as usize;
+        let total_frames = seq_len * pat_len;
+
+        let mut voice_a = Vec::with_capacity(total_frames);
+        let mut voice_b = Vec::with_capacity(total_frames);
+        let mut voice_c = Vec::with_capacity(total_frames);
+        let mut global_frames = Vec::with_capacity(total_frames);
+
+        for s in 0..seq_len {
+            // Track A
+            let pat_a = self.track_a.sequence_table[s];
+            if pat_a == SENTINEL_EMPTY_PATTERN {
+                voice_a.resize(voice_a.len() + pat_len, VoiceFrame::default());
+            } else {
+                let pat_bytes = self
+                    .track_a
+                    .unique_patterns
+                    .get(pat_a as usize)
+                    .ok_or_else(|| {
+                        format!("Track A step {s} pattern index {pat_a} out of bounds")
+                    })?;
+                voice_a.extend(decode_voice_stream(pat_bytes, pat_len)?);
+            }
+
+            // Track B
+            let pat_b = self.track_b.sequence_table[s];
+            if pat_b == SENTINEL_EMPTY_PATTERN {
+                voice_b.resize(voice_b.len() + pat_len, VoiceFrame::default());
+            } else {
+                let pat_bytes = self
+                    .track_b
+                    .unique_patterns
+                    .get(pat_b as usize)
+                    .ok_or_else(|| {
+                        format!("Track B step {s} pattern index {pat_b} out of bounds")
+                    })?;
+                voice_b.extend(decode_voice_stream(pat_bytes, pat_len)?);
+            }
+
+            // Track C
+            let pat_c = self.track_c.sequence_table[s];
+            if pat_c == SENTINEL_EMPTY_PATTERN {
+                voice_c.resize(voice_c.len() + pat_len, VoiceFrame::default());
+            } else {
+                let pat_bytes = self
+                    .track_c
+                    .unique_patterns
+                    .get(pat_c as usize)
+                    .ok_or_else(|| {
+                        format!("Track C step {s} pattern index {pat_c} out of bounds")
+                    })?;
+                voice_c.extend(decode_voice_stream(pat_bytes, pat_len)?);
+            }
+
+            // Track Global
+            let pat_glob = self.track_global.sequence_table[s];
+            if pat_glob == SENTINEL_EMPTY_PATTERN {
+                global_frames.resize(global_frames.len() + pat_len, GlobalFrame::default());
+            } else {
+                let pat_bytes = self
+                    .track_global
+                    .unique_patterns
+                    .get(pat_glob as usize)
+                    .ok_or_else(|| {
+                        format!("Track Global step {s} pattern index {pat_glob} out of bounds")
+                    })?;
+                global_frames.extend(decode_global_stream(pat_bytes, pat_len)?);
+            }
+        }
+
+        let mut frames = Vec::with_capacity(total_frames);
+        for i in 0..total_frames {
+            let va = voice_a[i];
+            let vb = voice_b[i];
+            let vc = voice_c[i];
+            let glob = global_frames[i];
+
+            frames.push(YmFrame {
+                tone_a: Some(va.period),
+                tone_b: Some(vb.period),
+                tone_c: Some(vc.period),
+                noise_period: Some(glob.noise_period),
+                volume_a: Some(if va.envelope_mode { 0x10 } else { va.volume }),
+                volume_b: Some(if vb.envelope_mode { 0x10 } else { vb.volume }),
+                volume_c: Some(if vc.envelope_mode { 0x10 } else { vc.volume }),
+                tone_enable_a: Some((glob.mixer & 0x01) == 0),
+                tone_enable_b: Some((glob.mixer & 0x02) == 0),
+                tone_enable_c: Some((glob.mixer & 0x04) == 0),
+                noise_enable_a: Some((glob.mixer & 0x08) == 0),
+                noise_enable_b: Some((glob.mixer & 0x10) == 0),
+                noise_enable_c: Some((glob.mixer & 0x20) == 0),
+                envelope_period: Some(glob.envelope_period),
+                envelope_shape: glob.envelope_shape,
+                duration: None,
+            });
+        }
+
+        let loop_start = if self.header.loop_step == 255 {
+            None
         } else {
-            if unique_patterns.len() >= 0xFF {
-                return Err("Track exceeds maximum of 254 unique patterns".into());
-            }
-            let idx = unique_patterns.len() as u8;
-            unique_patterns.push(pat_bytes);
-            sequence_table.push(idx);
-        }
-    }
+            Some(self.header.loop_step as usize * pat_len)
+        };
 
-    Ok(TrackDescriptor {
-        unique_patterns,
-        sequence_table,
-    })
+        Ok(YmSequence {
+            name: name.to_string(),
+            timing: TimingConfig {
+                master_clock_hz: self.header.master_clock_hz,
+                frame_rate: SystemHz::Custom(u32::from(self.header.frame_rate_hz)),
+            },
+            priority: 0,
+            loop_start,
+            frames,
+        })
+    }
 }
 
-/// Compiles a [`YmSequence`] into a complete standalone relocatable YSG binary stream.
+/// Compiles an uncompressed [`YmSequence`] into a YSG song stream using `pattern_frames` chunking.
 ///
 /// # Errors
 /// Returns an error if the song has no frames, sequence length exceeds 255 steps,
 /// or unique pattern pools exceed capacity.
-#[allow(clippy::similar_names)]
 pub fn compile_ysg(
     song: &YmSequence,
     pattern_frames: u8,
 ) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
-    if pattern_frames == 0 {
-        return Err("Pattern frames must be greater than zero".into());
-    }
-    if song.frames.is_empty() {
-        return Err("Cannot compile empty song sequence".into());
-    }
-
-    let pat_len = pattern_frames as usize;
-    let padded_len = song.frames.len().next_multiple_of(pat_len);
-    let mut padded_frames = song.frames.clone();
-    padded_frames.resize(
-        padded_len,
-        YmFrame {
-            volume_a: Some(0),
-            volume_b: Some(0),
-            volume_c: Some(0),
-            ..Default::default()
-        },
-    );
-
-    let seq_len = padded_len / pat_len;
-    if seq_len > 255 {
-        return Err(format!("Song length ({seq_len} patterns) exceeds maximum 255 steps").into());
-    }
-
-    let (track_a_frames, track_b_frames, track_c_frames, track_glob_frames) = decompose_frames(&padded_frames);
-
-    let track_a_desc = build_voice_track_descriptor(&track_a_frames, pat_len)?;
-    let track_b_desc = build_voice_track_descriptor(&track_b_frames, pat_len)?;
-    let track_c_desc = build_voice_track_descriptor(&track_c_frames, pat_len)?;
-    let track_glob_desc = build_global_track_descriptor(&track_glob_frames, pat_len)?;
-
-    let bytes_a = track_a_desc.to_bytes();
-    let bytes_b = track_b_desc.to_bytes();
-    let bytes_c = track_c_desc.to_bytes();
-    let bytes_glob = track_glob_desc.to_bytes();
-
-    let off_a = YSG_HEADER_SIZE as u16;
-    let off_b = off_a + bytes_a.len() as u16;
-    let off_c = off_b + bytes_b.len() as u16;
-    let off_glob = off_c + bytes_c.len() as u16;
-
-    let loop_step = match song.loop_start {
-        Some(frame) => {
-            let step = frame / pat_len;
-            if step < seq_len && step < 255 {
-                step as u8
-            } else {
-                255
-            }
-        }
-        None => 255,
-    };
-
-    let header = YsgHeader {
-        pattern_frames,
-        seq_len: seq_len as u8,
-        loop_step,
-        frame_rate_hz: song.timing.frame_rate.hz_value() as u16,
-        master_clock_hz: song.timing.master_clock_hz,
-        offset_track_a: off_a,
-        offset_track_b: off_b,
-        offset_track_c: off_c,
-        offset_track_global: off_glob,
-    };
-
-    let header_bytes = header.to_bytes();
-    let mut total_bytes = Vec::with_capacity(YSG_HEADER_SIZE + bytes_a.len() + bytes_b.len() + bytes_c.len() + bytes_glob.len());
-    total_bytes.extend_from_slice(&header_bytes);
-    total_bytes.extend_from_slice(&bytes_a);
-    total_bytes.extend_from_slice(&bytes_b);
-    total_bytes.extend_from_slice(&bytes_c);
-    total_bytes.extend_from_slice(&bytes_glob);
-
-    Ok(YsgSongDetails {
-        bytes: total_bytes,
-        pattern_frames,
-        seq_len: seq_len as u8,
-        unique_patterns_a: track_a_desc.unique_patterns.len(),
-        unique_patterns_b: track_b_desc.unique_patterns.len(),
-        unique_patterns_c: track_c_desc.unique_patterns.len(),
-        unique_patterns_global: track_glob_desc.unique_patterns.len(),
-        track_a_bytes: bytes_a.len(),
-        track_b_bytes: bytes_b.len(),
-        track_c_bytes: bytes_c.len(),
-        track_global_bytes: bytes_glob.len(),
-    })
+    YsgFile::compile(song, pattern_frames)
 }
-
-/// Backwards compatibility alias for `compile_ysg`.
-pub use compile_ysg as compile_ycs;
 
 /// Candidate pattern frame sizes to evaluate for optimal compression.
 pub const CANDIDATE_PATTERN_FRAMES: &[u8] = &[16, 24, 32, 48, 64, 96, 128];
@@ -863,171 +1293,95 @@ pub const CANDIDATE_PATTERN_FRAMES: &[u8] = &[16, 24, 32, 48, 64, 96, 128];
 ///
 /// # Errors
 /// Returns an error if no valid pattern frame size can compress the song.
-pub fn compile_ysg_optimal(song: &YmSequence) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
-    let mut best_details: Option<YsgSongDetails> = None;
-
-    for &pf in CANDIDATE_PATTERN_FRAMES {
-        let pat_len = pf as usize;
-        let padded_len = song.frames.len().next_multiple_of(pat_len);
-        let seq_len = padded_len / pat_len;
-        if seq_len > 255 {
-            continue;
-        }
-
-        if let Ok(details) = compile_ysg(song, pf) {
-            if let Some(ref current_best) = best_details {
-                if details.bytes.len() < current_best.bytes.len() {
-                    best_details = Some(details);
-                }
-            } else {
-                best_details = Some(details);
-            }
-        }
-    }
-
-    best_details.ok_or_else(|| "Could not find a valid pattern size fitting sequence length limits".into())
+pub fn compile_ysg_optimal(
+    song: &YmSequence,
+) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+    YsgFile::compile_optimal(song)
 }
 
-/// Backwards compatibility alias for `compile_ysg_optimal`.
-pub use compile_ysg_optimal as compile_ycs_optimal;
-
-/// Decodes a compiled `.ysg` (or legacy `.ycs`) binary stream into a high-level [`YmSequence`].
+/// Decodes a compiled `.ysg` binary stream into a high-level [`YmSequence`].
 ///
 /// # Errors
 /// Returns an error if header validation fails, track descriptors are corrupted,
 /// or opcode stream payload bytes are malformed.
-#[allow(clippy::similar_names, clippy::too_many_lines)]
 pub fn decompile_ysg(name: &str, bytes: &[u8]) -> Result<YmSequence, Box<dyn std::error::Error>> {
-    let header = YsgHeader::from_bytes(bytes)?;
-    let seq_len = header.seq_len as usize;
-    let pat_len = header.pattern_frames as usize;
-    let total_frames = seq_len * pat_len;
-
-    let off_a = header.offset_track_a as usize;
-    let off_b = header.offset_track_b as usize;
-    let off_c = header.offset_track_c as usize;
-    let off_glob = header.offset_track_global as usize;
-
-    if off_a > off_b || off_b > off_c || off_c > off_glob || off_glob > bytes.len() {
-        return Err("Invalid track offsets in YSG header".into());
-    }
-
-    let track_a_desc = TrackDescriptor::from_bytes(&bytes[off_a..off_b], seq_len)?;
-    let track_b_desc = TrackDescriptor::from_bytes(&bytes[off_b..off_c], seq_len)?;
-    let track_c_desc = TrackDescriptor::from_bytes(&bytes[off_c..off_glob], seq_len)?;
-    let track_glob_desc = TrackDescriptor::from_bytes(&bytes[off_glob..bytes.len()], seq_len)?;
-
-    let mut voice_a = Vec::with_capacity(total_frames);
-    let mut voice_b = Vec::with_capacity(total_frames);
-    let mut voice_c = Vec::with_capacity(total_frames);
-    let mut global_frames = Vec::with_capacity(total_frames);
-
-    for s in 0..seq_len {
-        // Track A
-        let pat_a = track_a_desc.sequence_table[s];
-        if pat_a == SENTINEL_EMPTY_PATTERN {
-            voice_a.resize(voice_a.len() + pat_len, VoiceFrame::default());
-        } else {
-            let pat_bytes = track_a_desc
-                .unique_patterns
-                .get(pat_a as usize)
-                .ok_or_else(|| format!("Track A step {s} pattern index {pat_a} out of bounds"))?;
-            let decoded = decode_voice_stream(pat_bytes, pat_len)?;
-            voice_a.extend(decoded);
-        }
-
-        // Track B
-        let pat_b = track_b_desc.sequence_table[s];
-        if pat_b == SENTINEL_EMPTY_PATTERN {
-            voice_b.resize(voice_b.len() + pat_len, VoiceFrame::default());
-        } else {
-            let pat_bytes = track_b_desc
-                .unique_patterns
-                .get(pat_b as usize)
-                .ok_or_else(|| format!("Track B step {s} pattern index {pat_b} out of bounds"))?;
-            let decoded = decode_voice_stream(pat_bytes, pat_len)?;
-            voice_b.extend(decoded);
-        }
-
-        // Track C
-        let pat_c = track_c_desc.sequence_table[s];
-        if pat_c == SENTINEL_EMPTY_PATTERN {
-            voice_c.resize(voice_c.len() + pat_len, VoiceFrame::default());
-        } else {
-            let pat_bytes = track_c_desc
-                .unique_patterns
-                .get(pat_c as usize)
-                .ok_or_else(|| format!("Track C step {s} pattern index {pat_c} out of bounds"))?;
-            let decoded = decode_voice_stream(pat_bytes, pat_len)?;
-            voice_c.extend(decoded);
-        }
-
-        // Track Global
-        let pat_glob = track_glob_desc.sequence_table[s];
-        if pat_glob == SENTINEL_EMPTY_PATTERN {
-            global_frames.resize(global_frames.len() + pat_len, GlobalFrame::default());
-        } else {
-            let pat_bytes = track_glob_desc
-                .unique_patterns
-                .get(pat_glob as usize)
-                .ok_or_else(|| format!("Track Global step {s} pattern index {pat_glob} out of bounds"))?;
-            let decoded = decode_global_stream(pat_bytes, pat_len)?;
-            global_frames.extend(decoded);
-        }
-    }
-
-    let mut frames = Vec::with_capacity(total_frames);
-    for i in 0..total_frames {
-        let va = voice_a[i];
-        let vb = voice_b[i];
-        let vc = voice_c[i];
-        let glob = global_frames[i];
-
-        frames.push(YmFrame {
-            tone_a: Some(va.period),
-            tone_b: Some(vb.period),
-            tone_c: Some(vc.period),
-            noise_period: Some(glob.noise_period),
-            volume_a: Some(if va.envelope_mode { 0x10 } else { va.volume }),
-            volume_b: Some(if vb.envelope_mode { 0x10 } else { vb.volume }),
-            volume_c: Some(if vc.envelope_mode { 0x10 } else { vc.volume }),
-            tone_enable_a: Some((glob.mixer & 0x01) == 0),
-            tone_enable_b: Some((glob.mixer & 0x02) == 0),
-            tone_enable_c: Some((glob.mixer & 0x04) == 0),
-            noise_enable_a: Some((glob.mixer & 0x08) == 0),
-            noise_enable_b: Some((glob.mixer & 0x10) == 0),
-            noise_enable_c: Some((glob.mixer & 0x20) == 0),
-            envelope_period: Some(glob.envelope_period),
-            envelope_shape: glob.envelope_shape,
-            duration: None,
-        });
-    }
-
-    let loop_start = if header.loop_step == 255 {
-        None
-    } else {
-        Some(header.loop_step as usize * pat_len)
-    };
-
-    Ok(YmSequence {
-        name: name.to_string(),
-        timing: TimingConfig {
-            master_clock_hz: header.master_clock_hz,
-            frame_rate: SystemHz::Custom(u32::from(header.frame_rate_hz)),
-        },
-        priority: 0,
-        loop_start,
-        frames,
-    })
+    YsgFile::decompile(name, bytes)
 }
-
-/// Backwards compatibility alias for `decompile_ysg`.
-pub use decompile_ysg as decompile_ycs;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::player::YmSongRenderer;
+    use crate::traits::SongInput;
+
+    fn assert_round_trip_frames_match(expected: &[YmFrame], actual: &[YmFrame]) {
+        for (idx, (orig, dec)) in expected.iter().zip(actual.iter()).enumerate() {
+            let check_channel = |orig_vol: Option<u8>,
+                                 dec_vol: Option<u8>,
+                                 orig_tone: Option<u16>,
+                                 dec_tone: Option<u16>,
+                                 name: &str| {
+                let v_orig = orig_vol.unwrap_or(0);
+                let v_dec = dec_vol.unwrap_or(0);
+                assert_eq!(v_orig, v_dec, "Volume {name} mismatch at frame {idx}");
+                if v_orig > 0 {
+                    assert_eq!(
+                        orig_tone.unwrap_or(0),
+                        dec_tone.unwrap_or(0),
+                        "Tone {name} mismatch at frame {idx}"
+                    );
+                }
+            };
+
+            check_channel(orig.volume_a, dec.volume_a, orig.tone_a, dec.tone_a, "A");
+            check_channel(orig.volume_b, dec.volume_b, orig.tone_b, dec.tone_b, "B");
+            check_channel(orig.volume_c, dec.volume_c, orig.tone_c, dec.tone_c, "C");
+
+            let noise_active = orig.noise_enable_a.unwrap_or(false)
+                || orig.noise_enable_b.unwrap_or(false)
+                || orig.noise_enable_c.unwrap_or(false);
+            if noise_active {
+                assert_eq!(
+                    orig.noise_period.unwrap_or(0),
+                    dec.noise_period.unwrap_or(0),
+                    "Noise period mismatch at frame {idx}"
+                );
+            }
+            assert_eq!(
+                orig.tone_enable_a, dec.tone_enable_a,
+                "Tone enable A mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.tone_enable_b, dec.tone_enable_b,
+                "Tone enable B mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.tone_enable_c, dec.tone_enable_c,
+                "Tone enable C mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.noise_enable_a, dec.noise_enable_a,
+                "Noise enable A mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.noise_enable_b, dec.noise_enable_b,
+                "Noise enable B mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.noise_enable_c, dec.noise_enable_c,
+                "Noise enable C mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.envelope_period.unwrap_or(0),
+                dec.envelope_period.unwrap_or(0),
+                "Env period mismatch at frame {idx}"
+            );
+            assert_eq!(
+                orig.envelope_shape, dec.envelope_shape,
+                "Env shape mismatch at frame {idx}"
+            );
+        }
+    }
 
     #[test]
     fn test_ysg_header_round_trip() {
@@ -1050,13 +1404,6 @@ mod tests {
 
         let parsed = YsgHeader::from_bytes(&bytes).expect("Header parse should succeed");
         assert_eq!(header, parsed);
-
-        // Verify backwards compatibility with YCS_MAGIC
-        let mut ycs_bytes = bytes;
-        ycs_bytes[0] = b'Y';
-        ycs_bytes[1] = b'C';
-        let parsed_ycs = YsgHeader::from_bytes(&ycs_bytes).expect("YCS legacy header parse should succeed");
-        assert_eq!(header, parsed_ycs);
     }
 
     #[test]
@@ -1094,7 +1441,11 @@ mod tests {
         });
 
         let encoded = encode_voice_pattern(&frames);
-        assert!(encoded.len() < 15, "Expected high compression on sustained note, got {} bytes", encoded.len());
+        assert!(
+            encoded.len() < 15,
+            "Expected high compression on sustained note, got {} bytes",
+            encoded.len()
+        );
 
         let decoded = decode_voice_stream(&encoded, frames.len()).expect("Decode should succeed");
         assert_eq!(decoded.len(), frames.len());
@@ -1137,7 +1488,11 @@ mod tests {
         }
 
         let encoded = encode_global_pattern(&frames);
-        assert!(encoded.len() < 15, "Expected high compression on global stream, got {} bytes", encoded.len());
+        assert!(
+            encoded.len() < 15,
+            "Expected high compression on global stream, got {} bytes",
+            encoded.len()
+        );
 
         let decoded = decode_global_stream(&encoded, frames.len()).expect("Decode should succeed");
         assert_eq!(decoded.len(), frames.len());
@@ -1150,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ycs_full_round_trip_compilation() {
+    fn test_ysg_full_round_trip_compilation() {
         let mut frames = Vec::new();
         for i in 0..96 {
             frames.push(YmFrame {
@@ -1165,7 +1520,7 @@ mod tests {
         }
 
         let song = YmSequence {
-            name: "test_ycs".to_string(),
+            name: "test_ysg".to_string(),
             timing: TimingConfig {
                 master_clock_hz: 1_789_773,
                 frame_rate: SystemHz::Hz50,
@@ -1175,11 +1530,15 @@ mod tests {
             frames,
         };
 
-        let details = compile_ycs(&song, 48).expect("Compilation should succeed");
+        let details = compile_ysg(&song, 48).expect("Compilation should succeed");
         assert_eq!(details.seq_len, 2);
-        assert_eq!(details.unique_patterns_b, 1, "Channel B should be deduplicated to 1 pattern");
+        assert_eq!(
+            details.unique_patterns_b, 1,
+            "Channel B should be deduplicated to 1 pattern"
+        );
 
-        let decompiled = decompile_ycs("test_ycs", &details.bytes).expect("Decompile should succeed");
+        let decompiled =
+            decompile_ysg("test_ysg", &details.bytes).expect("Decompile should succeed");
         assert_eq!(decompiled.frames.len(), 96);
         assert_eq!(decompiled.loop_start, Some(48));
         assert_eq!(decompiled.timing.master_clock_hz, 1_789_773);
@@ -1187,14 +1546,20 @@ mod tests {
 
         for (idx, (orig, dec)) in song.frames.iter().zip(decompiled.frames.iter()).enumerate() {
             assert_eq!(orig.tone_a, dec.tone_a, "Tone A mismatch at frame {idx}");
-            assert_eq!(orig.volume_a, dec.volume_a, "Volume A mismatch at frame {idx}");
+            assert_eq!(
+                orig.volume_a, dec.volume_a,
+                "Volume A mismatch at frame {idx}"
+            );
             assert_eq!(orig.tone_b, dec.tone_b, "Tone B mismatch at frame {idx}");
-            assert_eq!(orig.volume_b, dec.volume_b, "Volume B mismatch at frame {idx}");
+            assert_eq!(
+                orig.volume_b, dec.volume_b,
+                "Volume B mismatch at frame {idx}"
+            );
         }
     }
 
     #[test]
-    fn test_cpc_dream_ycs_compression_round_trip() {
+    fn test_cpc_dream_ysg_compression_round_trip() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let ym_path = std::path::Path::new(&manifest_dir).join("../test.ym");
         if !ym_path.exists() {
@@ -1202,12 +1567,15 @@ mod tests {
         }
 
         let bytes = std::fs::read(&ym_path).expect("Failed to read test.ym");
-        let (song, _) = YmSequence::from_ym_data("cpc_dream", &bytes, None, None)
+        let ym_file = crate::ym_file::YmFile::from_bytes("cpc_dream", &bytes, None)
             .expect("Failed to parse test.ym");
+        let song = ym_file
+            .to_sequence(None)
+            .expect("Failed to convert to sequence");
 
         assert_eq!(song.frames.len(), 6144);
 
-        println!("\n=== YCS Pattern Size Exploration (CPC-Dream) ===");
+        println!("\n=== YSG Pattern Size Exploration (CPC-Dream) ===");
         println!("Frames | Steps | Uniq A/B/C/Glob | Track Bytes (A/B/C/Glob) | Total Bytes | Reduction vs Raw");
         println!("-----------------------------------------------------------------------------------------");
 
@@ -1215,7 +1583,7 @@ mod tests {
         let mut best_frames = 0;
 
         for &pf in &[8u8, 12, 16, 24, 32, 48, 64, 96, 128] {
-            if let Ok(det) = compile_ycs(&song, pf) {
+            if let Ok(det) = compile_ysg(&song, pf) {
                 let sz = det.bytes.len();
                 let pct = (1.0 - (sz as f64 / 98424.0)) * 100.0;
                 println!(
@@ -1236,57 +1604,34 @@ mod tests {
 
         let (ta, _tb, _tc, _tg) = decompose_frames(&song.frames);
         let pat0_a = encode_voice_pattern(&ta[0..48]);
-        println!("Track A Pattern 0 encoded bytes (len={}): {:?}", pat0_a.len(), pat0_a);
+        println!(
+            "Track A Pattern 0 encoded bytes (len={}): {:?}",
+            pat0_a.len(),
+            pat0_a
+        );
         let pat1_a = encode_voice_pattern(&ta[48..96]);
-        println!("Track A Pattern 1 encoded bytes (len={}): {:?}", pat1_a.len(), pat1_a);
+        println!(
+            "Track A Pattern 1 encoded bytes (len={}): {:?}",
+            pat1_a.len(),
+            pat1_a
+        );
         let pat2_a = encode_voice_pattern(&ta[96..144]);
-        println!("Track A Pattern 2 encoded bytes (len={}): {:?}", pat2_a.len(), pat2_a);
+        println!(
+            "Track A Pattern 2 encoded bytes (len={}): {:?}",
+            pat2_a.len(),
+            pat2_a
+        );
 
-        let best_details = compile_ycs(&song, best_frames).expect("Compile best should succeed");
+        let best_details = compile_ysg(&song, best_frames).expect("Compile best should succeed");
         // Verify round-trip decompression
-        let decompiled = decompile_ycs("cpc_dream", &best_details.bytes).expect("Decompile should succeed");
+        let decompiled =
+            decompile_ysg("cpc_dream", &best_details.bytes).expect("Decompile should succeed");
         assert_eq!(decompiled.frames.len(), 6144);
 
         println!("Frame 4560 orig: {:?}", song.frames[4560]);
         println!("Frame 4560 dec : {:?}", decompiled.frames[4560]);
 
-        for (idx, (orig, dec)) in song.frames.iter().zip(decompiled.frames.iter()).enumerate() {
-            let orig_vol_a = orig.volume_a.unwrap_or(0);
-            let dec_vol_a = dec.volume_a.unwrap_or(0);
-            assert_eq!(orig_vol_a, dec_vol_a, "Volume A mismatch at frame {idx}");
-            if orig_vol_a > 0 {
-                assert_eq!(orig.tone_a.unwrap_or(0), dec.tone_a.unwrap_or(0), "Tone A mismatch at frame {idx}");
-            }
-
-            let orig_vol_b = orig.volume_b.unwrap_or(0);
-            let dec_vol_b = dec.volume_b.unwrap_or(0);
-            assert_eq!(orig_vol_b, dec_vol_b, "Volume B mismatch at frame {idx}");
-            if orig_vol_b > 0 {
-                assert_eq!(orig.tone_b.unwrap_or(0), dec.tone_b.unwrap_or(0), "Tone B mismatch at frame {idx}");
-            }
-
-            let orig_vol_c = orig.volume_c.unwrap_or(0);
-            let dec_vol_c = dec.volume_c.unwrap_or(0);
-            assert_eq!(orig_vol_c, dec_vol_c, "Volume C mismatch at frame {idx}");
-            if orig_vol_c > 0 {
-                assert_eq!(orig.tone_c.unwrap_or(0), dec.tone_c.unwrap_or(0), "Tone C mismatch at frame {idx}");
-            }
-
-            let noise_active = orig.noise_enable_a.unwrap_or(false)
-                || orig.noise_enable_b.unwrap_or(false)
-                || orig.noise_enable_c.unwrap_or(false);
-            if noise_active {
-                assert_eq!(orig.noise_period.unwrap_or(0), dec.noise_period.unwrap_or(0), "Noise period mismatch at frame {idx}");
-            }
-            assert_eq!(orig.tone_enable_a, dec.tone_enable_a, "Tone enable A mismatch at frame {idx}");
-            assert_eq!(orig.tone_enable_b, dec.tone_enable_b, "Tone enable B mismatch at frame {idx}");
-            assert_eq!(orig.tone_enable_c, dec.tone_enable_c, "Tone enable C mismatch at frame {idx}");
-            assert_eq!(orig.noise_enable_a, dec.noise_enable_a, "Noise enable A mismatch at frame {idx}");
-            assert_eq!(orig.noise_enable_b, dec.noise_enable_b, "Noise enable B mismatch at frame {idx}");
-            assert_eq!(orig.noise_enable_c, dec.noise_enable_c, "Noise enable C mismatch at frame {idx}");
-            assert_eq!(orig.envelope_period.unwrap_or(0), dec.envelope_period.unwrap_or(0), "Env period mismatch at frame {idx}");
-            assert_eq!(orig.envelope_shape, dec.envelope_shape, "Env shape mismatch at frame {idx}");
-        }
+        assert_round_trip_frames_match(&song.frames, &decompiled.frames);
     }
 
     #[test]
@@ -1295,57 +1640,23 @@ mod tests {
         if !ym_path.exists() {
             return;
         }
-        let (song, _) = YmSequence::from_ym_data(
-            "scout",
-            &std::fs::read(ym_path).unwrap(),
-            None,
-            None,
-        ).unwrap();
+        let bytes = std::fs::read(ym_path).unwrap();
+        let ym_file = crate::ym_file::YmFile::from_bytes("scout", &bytes, None).unwrap();
+        let song = ym_file.to_sequence(None).unwrap();
 
         let compiled = compile_ysg_optimal(&song).expect("Compile scout should succeed");
-        println!("Scout compiled pattern_frames: {}, seq_len: {}, total_bytes: {}",
-            compiled.pattern_frames, compiled.seq_len, compiled.bytes.len());
+        println!(
+            "Scout compiled pattern_frames: {}, seq_len: {}, total_bytes: {}",
+            compiled.pattern_frames,
+            compiled.seq_len,
+            compiled.bytes.len()
+        );
 
-        let decompiled = decompile_ysg("scout", &compiled.bytes).expect("Decompile scout should succeed");
+        let decompiled =
+            decompile_ysg("scout", &compiled.bytes).expect("Decompile scout should succeed");
         assert!(decompiled.frames.len() >= song.frames.len());
 
-        for (idx, (orig, dec)) in song.frames.iter().zip(decompiled.frames.iter()).enumerate() {
-            let orig_vol_a = orig.volume_a.unwrap_or(0);
-            let dec_vol_a = dec.volume_a.unwrap_or(0);
-            assert_eq!(orig_vol_a, dec_vol_a, "Volume A mismatch at frame {idx}");
-            if orig_vol_a > 0 {
-                assert_eq!(orig.tone_a.unwrap_or(0), dec.tone_a.unwrap_or(0), "Tone A mismatch at frame {idx}");
-            }
-
-            let orig_vol_b = orig.volume_b.unwrap_or(0);
-            let dec_vol_b = dec.volume_b.unwrap_or(0);
-            assert_eq!(orig_vol_b, dec_vol_b, "Volume B mismatch at frame {idx}");
-            if orig_vol_b > 0 {
-                assert_eq!(orig.tone_b.unwrap_or(0), dec.tone_b.unwrap_or(0), "Tone B mismatch at frame {idx}");
-            }
-
-            let orig_vol_c = orig.volume_c.unwrap_or(0);
-            let dec_vol_c = dec.volume_c.unwrap_or(0);
-            assert_eq!(orig_vol_c, dec_vol_c, "Volume C mismatch at frame {idx}");
-            if orig_vol_c > 0 {
-                assert_eq!(orig.tone_c.unwrap_or(0), dec.tone_c.unwrap_or(0), "Tone C mismatch at frame {idx}");
-            }
-
-            let noise_active = orig.noise_enable_a.unwrap_or(false)
-                || orig.noise_enable_b.unwrap_or(false)
-                || orig.noise_enable_c.unwrap_or(false);
-            if noise_active {
-                assert_eq!(orig.noise_period.unwrap_or(0), dec.noise_period.unwrap_or(0), "Noise period mismatch at frame {idx}");
-            }
-            assert_eq!(orig.tone_enable_a, dec.tone_enable_a, "Tone enable A mismatch at frame {idx}");
-            assert_eq!(orig.tone_enable_b, dec.tone_enable_b, "Tone enable B mismatch at frame {idx}");
-            assert_eq!(orig.tone_enable_c, dec.tone_enable_c, "Tone enable C mismatch at frame {idx}");
-            assert_eq!(orig.noise_enable_a, dec.noise_enable_a, "Noise enable A mismatch at frame {idx}");
-            assert_eq!(orig.noise_enable_b, dec.noise_enable_b, "Noise enable B mismatch at frame {idx}");
-            assert_eq!(orig.noise_enable_c, dec.noise_enable_c, "Noise enable C mismatch at frame {idx}");
-            assert_eq!(orig.envelope_period.unwrap_or(0), dec.envelope_period.unwrap_or(0), "Env period mismatch at frame {idx}");
-            assert_eq!(orig.envelope_shape, dec.envelope_shape, "Env shape mismatch at frame {idx}");
-        }
+        assert_round_trip_frames_match(&song.frames, &decompiled.frames);
 
         // Compare first 5 seconds of synthesized audio
         let mut r_orig = YmSongRenderer::new(&song, 44100);
@@ -1366,6 +1677,9 @@ mod tests {
             }
         }
         println!("Total audio sample diffs in first 5s: {diff_count} / {sample_count}");
-        assert_eq!(diff_count, 0, "Audio output differs between original and decompiled Scout!");
+        assert_eq!(
+            diff_count, 0,
+            "Audio output differs between original and decompiled Scout!"
+        );
     }
 }
