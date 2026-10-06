@@ -1016,7 +1016,6 @@ dependencies = [
 name = "tia-core"
 version = "0.1.0"
 dependencies = [
- "cpal",
  "serde",
  "serde_json",
 ]
