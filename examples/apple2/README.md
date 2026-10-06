@@ -51,9 +51,10 @@ To run a different built song manually from the `]` prompt: `BRUN NAME`
 ## Notes
 
 - Default slot is 4 (`$C400`); override at assemble time with `-D MOCK_SLOT=n`.
-- Songs longer than `YSG_MAX_BYTES` get truncated to fit Apple II RAM
-  (`$0803`-`$9600`, shared with the ~500-byte player) — the build warns when
-  this happens. Truncation cuts at an arbitrary byte boundary, not the
+- Songs must fit Apple II RAM (`$0803`-`$9600`, shared with the ~500-byte
+  player); a song that doesn't is skipped. Set `YSG_MAX_BYTES` (e.g.
+  `make YSG_MAX_BYTES=35000`) to truncate oversized songs instead — the build
+  warns when this happens. Truncation cuts at a pattern boundary, not the
   song's musical loop point, so a truncated song usually can't loop
   correctly: if the original loop point falls past the cutoff, looping is
   disabled and the player just restarts from frame 0 instead, which sounds

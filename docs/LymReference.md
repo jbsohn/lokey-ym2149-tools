@@ -29,7 +29,7 @@ Compiles a source music song (`.ym` or `.json`) into an optimized `.ysg` binary 
 lym song render --input <PATH> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
 | Option             | Flag | Description                                                                                                                                                                                                                                                                                  | Default                          |
 |:-------------------|:-----|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------------------------|
@@ -40,6 +40,7 @@ lym song render --input <PATH> [OPTIONS]
 | `--target-clock`   |      | Target chip clock in Hz that pitches are retuned for (e.g. `2000000` to keep an Atari ST source at native pitch, `1020484` for Apple II Mockingboard/AppleWin — real Mockingboard hardware clocks the AY-3-8910 off the 6502 clock, so notes play back roughly an octave flat without this). | `1789773` (Atari 7800)           |
 | `--step`           | `-s` | Decimation window size for temporal frame reduction (e.g. `--step 2` reduces 50 Hz to 25 Hz).                                                                                                                                                                                                | `1`                              |
 | `--pattern-frames` |      | Fixed pattern frame chunk size (e.g. 16, 24, 32, 48, 64, 96, 128). If omitted, `lym` automatically tests all candidate sizes and selects the one that minimizes total stream size.                                                                                                          | Automatic optimal search         |
+| `--max-bytes`      |      | Truncate the song, dropping whole patterns from the end, until the compiled `.ysg` fits within `N` bytes. Prints a warning with the number of frames dropped. If the loop point is cut off, the song restarts from the beginning instead.                                                    | No limit                         |
 
 ---
 
@@ -51,7 +52,7 @@ lym song render --input <PATH> [OPTIONS]
    By default, `lym` benchmarks candidate pattern sizes (`[16, 24, 32, 48, 64, 96, 128]`) and automatically selects the size that yields the smallest total compressed binary for the given song. You can override this and lock in a specific pattern size using `--pattern-frames <N>`.
 
 2. **4-Stream Decoupled Architecture**:
-   Rather than packing all 14 registers into monolithic chunks, the compiler separates the song into four independent streams: Voice A, Voice B, Voice C, and Global/Envelope. This allows individual channels to repeat and deduplicate patterns independently (achieving a 50%–75% stream size reduction compared to the obsolete monolithic linear bitmask format).
+   The compiler separates the song into four independent streams: Voice A, Voice B, Voice C, and Global/Envelope. This allows individual channels to repeat and deduplicate patterns independently.
 
 3. **Run-Length Idle Frame Skipping**:
    When a channel sustains a note or remains silent, runs of idle frames (1 to 127 frames) are collapsed into single-byte wait tokens (`0bbbbbbb`). The 6502 replayer handles this in just 12 CPU cycles (`BPL .is_wait`) without reading or writing PSG registers.
@@ -74,7 +75,7 @@ Dumps raw YM2149 register field values for diagnostic inspection and frame analy
 lym song dump --input <PATH> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
 | Option     | Flag | Description                                                        | Default |
 |:-----------|:-----|:-------------------------------------------------------------------|:--------|
@@ -101,13 +102,13 @@ lym song render --input tests/fixtures/song/ND-Loader.ym --output tests/fixtures
 lym song play --input tests/fixtures/song/ND-Loader.ysg
 ```
 
-#### Options:
+#### Options
 
 | Option           | Flag | Description                                                                                      | Default      |
 |:-----------------|:-----|:-------------------------------------------------------------------------------------------------|:-------------|
 | `--input`        | `-i` | **Required**. Path to input song file (`.ym`, `.ysg`, or `.json`).                               | —            |
 | `--hz`           |      | Playback refresh rate override (`50` or `60` Hz).                                                | File default |
-| `--via-sequence` |      | Force `.ym` files to decode through the `YmSequence` pipeline rather than raw VBL sync playback. | `false`      |
+| `--raw`          |      | Play `.ym` files with the raw YM replayer, without interactive seeking controls.                 | `false`      |
 
 ---
 
@@ -122,7 +123,7 @@ a `.yfi` ca65 include file.
 lym sfx render --input <PATH> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
 | Option     | Flag | Description                                                                   | Default            |
 |:-----------|:-----|:------------------------------------------------------------------------------|:-------------------|
@@ -151,7 +152,7 @@ lym sfx render --input tests/fixtures/sfx/blip.json --output tests/fixtures/sfx/
 lym sfx play --input tests/fixtures/sfx/blip.yfx
 ```
 
-#### Options:
+#### Options
 
 | Option    | Flag | Description                                                               | Default      |
 |:----------|:-----|:--------------------------------------------------------------------------|:-------------|
@@ -171,7 +172,7 @@ conflict arbitration.
 lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
 | Option           | Flag | Description                                                                                             | Default                |
 |:-----------------|:-----|:--------------------------------------------------------------------------------------------------------|:-----------------------|
@@ -182,9 +183,8 @@ lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 | `--clock`        |      | Source chip clock in Hz.                                                                                | `2000000` (Atari ST)   |
 | `--target-clock` |      | Target chip clock in Hz to scale pitch for (e.g. `2000000` to keep an Atari ST source at native pitch). | `1789773` (Atari 7800) |
 
-#### Interactive Key Controls:
+#### Interactive Key Controls
 
 * `1`–`9`, `0`, `SPACE`: Trigger sound effects from loaded bank.
 * `←` / `→`: Seek backward / forward by 5-second intervals.
 * `q` / `Q`: Mute audio and quit mixer.
-

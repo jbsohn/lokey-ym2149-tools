@@ -98,20 +98,9 @@ struct SongRenderArgs {
     #[arg(long)]
     pattern_frames: Option<u8>,
 
-    /// Deprecated: legacy compression level.
-    #[arg(long, value_enum, hide = true)]
-    compression: Option<CompressionArg>,
-
-    /// Deprecated: legacy deduplication flag.
-    #[arg(long, hide = true)]
-    no_dedup: bool,
-
-    /// Deprecated: legacy RLE flag.
-    #[arg(long, hide = true)]
-    no_rle: bool,
-
-    /// Deprecated: legacy max bytes truncation.
-    #[arg(long, hide = true)]
+    /// Truncate the song (dropping whole patterns from the end) until the compiled
+    /// .ysg fits within N bytes
+    #[arg(long, value_name = "N")]
     max_bytes: Option<usize>,
 }
 
@@ -144,10 +133,6 @@ enum SongCommands {
         /// Use raw YM replayer without interactive seeking controls
         #[arg(long)]
         raw: bool,
-
-        /// Deprecated: interactive sequence playback is now default for all formats
-        #[arg(long, hide = true)]
-        via_sequence: bool,
     },
 }
 
@@ -166,13 +151,6 @@ impl From<HzOptionArg> for HzOption {
             HzOptionArg::Hz60 => HzOption::Hz60,
         }
     }
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy)]
-enum CompressionArg {
-    Full,
-    DeltaOnly,
-    None,
 }
 
 // --- SFX SUBCOMMANDS ---
@@ -256,7 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 start,
             } => run_song_dump(&input, frames, start),
             SongCommands::Render { args } => run_song_render(args),
-            SongCommands::Play { input, hz, raw, .. } => run_song_play(&input, hz, raw),
+            SongCommands::Play { input, hz, raw } => run_song_play(&input, hz, raw),
         },
         MainCommands::Sfx { command } => match command {
             SfxCommands::Render { common, output } => run_sfx_render(&common, output),
@@ -326,7 +304,7 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         target_clock,
         step,
         pattern_frames,
-        ..
+        max_bytes,
     } = args;
     let input = input.as_path();
     let output_path = output.unwrap_or_else(|| {
@@ -347,13 +325,25 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
     sequence.decimate(step);
     apply_frame_rate(&mut sequence, hz.map(Into::into), step);
 
+    let original_frames = sequence.frames.len();
+    let compile = |seq: &YmSequence| match pattern_frames {
+        Some(pf) => YsgFile::from_sequence(seq, pf),
+        None => YsgFile::from_sequence_optimal(seq),
+    };
     let (ysg_file, compiled) = with_spinner("Compiling YSG song...", || {
-        if let Some(pf) = pattern_frames {
-            YsgFile::from_sequence(&sequence, pf)
-        } else {
-            YsgFile::from_sequence_optimal(&sequence)
+        match (compile(&sequence), max_bytes) {
+            // Too large for the format itself: with --max-bytes, cut the song down to
+            // the longest prefix that compiles, then let shrink_to_max_bytes trim further.
+            (Err(_), Some(_)) => compile_longest_prefix(&mut sequence, compile),
+            (result, _) => result,
         }
     })?;
+    let (ysg_file, compiled) = match max_bytes {
+        Some(limit) => {
+            shrink_to_max_bytes(&mut sequence, ysg_file, compiled, limit, original_frames)?
+        }
+        None => (ysg_file, compiled),
+    };
     fs::write(&output_path, ysg_file.to_bytes())?;
     write_ysi_include(input, name, &output_path, &sequence, &compiled)?;
 
@@ -385,6 +375,73 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
     }
     print_ysg_compression_report(&compiled);
     Ok(())
+}
+
+/// Binary-searches for the longest prefix of `sequence` that `compile` accepts and
+/// truncates the sequence to it, returning that compile result.
+fn compile_longest_prefix(
+    sequence: &mut YmSequence,
+    compile: impl Fn(&YmSequence) -> Result<(YsgFile, YsgSongDetails), Box<dyn std::error::Error>>,
+) -> Result<(YsgFile, YsgSongDetails), Box<dyn std::error::Error>> {
+    let mut best = None;
+    let (mut lo, mut hi) = (1, sequence.frames.len());
+    let mut trial = sequence.clone();
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        trial.frames.clear();
+        trial.frames.extend_from_slice(&sequence.frames[..mid]);
+        if let Ok(result) = compile(&trial) {
+            best = Some((mid, result));
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let (len, result) = best.ok_or("Song cannot be compiled even after truncation")?;
+    sequence.frames.truncate(len);
+    Ok(result)
+}
+
+/// Repeatedly drops the last pattern step and recompiles (keeping the pattern size of
+/// the initial compile) until the song fits within `limit` bytes, warning about how many
+/// frames were truncated in the process.
+fn shrink_to_max_bytes(
+    sequence: &mut YmSequence,
+    mut ysg_file: YsgFile,
+    mut compiled: YsgSongDetails,
+    limit: usize,
+    original_frames: usize,
+) -> Result<(YsgFile, YsgSongDetails), Box<dyn std::error::Error>> {
+    if compiled.bytes.len() <= limit && sequence.frames.len() == original_frames {
+        return Ok((ysg_file, compiled));
+    }
+
+    let pattern_frames = compiled.pattern_frames;
+    let pat_len = usize::from(pattern_frames);
+    with_spinner("Truncating to fit --max-bytes...", || {
+        while compiled.bytes.len() > limit {
+            let steps = sequence.frames.len().div_ceil(pat_len);
+            if steps <= 1 {
+                return Err(format!(
+                    "Cannot fit even one pattern within --max-bytes {limit} \
+                     (smallest is {} bytes)",
+                    compiled.bytes.len()
+                )
+                .into());
+            }
+            sequence.frames.truncate((steps - 1) * pat_len);
+            (ysg_file, compiled) = YsgFile::from_sequence(sequence, pattern_frames)?;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })?;
+
+    println!(
+        "{} truncated {} frames to fit within {} bytes",
+        style("WARNING:").bold().yellow(),
+        style(original_frames - sequence.frames.len()).yellow(),
+        style(limit).yellow(),
+    );
+    Ok((ysg_file, compiled))
 }
 
 /// Writes the `.ysi` ca65 include sidecar (frame/pattern counts, timing constants)

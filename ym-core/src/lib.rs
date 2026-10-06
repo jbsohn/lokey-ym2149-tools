@@ -24,7 +24,7 @@ pub use ym_file::YmFile;
 pub use ysg::{
     compile_ysg, compile_ysg_optimal, decompile_ysg, GlobalFrame, TrackDescriptor, VoiceFrame,
     YsgFile, YsgHeader, YsgSongDetails, CANDIDATE_PATTERN_FRAMES, SENTINEL_EMPTY_PATTERN,
-    YSG_HEADER_SIZE, YSG_MAGIC, YSG_VERSION,
+    YSG_HEADER_SIZE, YSG_MAGIC, YSG_MAX_FILE_SIZE, YSG_VERSION,
 };
 
 #[cfg(test)]

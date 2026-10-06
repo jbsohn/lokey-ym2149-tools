@@ -11,6 +11,9 @@ LD65         ?= $(shell which ld65 2>/dev/null || echo $(HOME)/cc65/bin/ld65)
 CA65_FLAGS   := -I. -I../include
 LD65_FLAGS   := -C 7800.cfg
 SIGN         := 7800sign
+# Optional: truncate songs whose compiled .ysg exceeds N bytes (unset = no limit).
+YSG_MAX_BYTES ?=
+MAX_BYTES_FLAG = $(if $(YSG_MAX_BYTES),--max-bytes $(YSG_MAX_BYTES))
 
 YM_SOURCES  := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM)
 YSG_FILES   := $(foreach f,$(YM_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
@@ -42,6 +45,7 @@ help:
 	@echo "  YM_DIR=path           Source directory for .ym files (default: ../../../tests/fixtures/song)"
 	@echo "  LYM=path              Path to lym binary (default: ../../../target/release/lym)"
 	@echo "  A78TOOL=path          Path to a78tool binary (default: a78tool)"
+	@echo "  YSG_MAX_BYTES=N       Truncate songs whose .ysg exceeds N bytes (default: no limit)"
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
@@ -52,11 +56,11 @@ RENDER_FLAGS_jess1 := --step 2
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*)
+	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*) $(MAX_BYTES_FLAG)
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*)
+	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*) $(MAX_BYTES_FLAG)
 
 # --- Assemble player once ---
 

@@ -11,6 +11,10 @@ pub const YSG_MAGIC: [u8; 2] = *b"YS";
 /// Current YSG container version.
 pub const YSG_VERSION: u8 = 0x01;
 
+/// Largest YSG container the format can address: header track offsets and per-track
+/// pattern offsets are 16-bit, so every byte of the file must sit below 64 KB.
+pub const YSG_MAX_FILE_SIZE: usize = 0xFFFF;
+
 /// Sentinel sequence table value indicating an entirely silent/empty pattern.
 pub const SENTINEL_EMPTY_PATTERN: u8 = 0xFF;
 
@@ -760,7 +764,18 @@ impl TrackDescriptor {
         Ok(())
     }
 
+    /// Returns the serialized size of this track descriptor without building it.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        1 + self.sequence_table.len()
+            + self.unique_patterns.len() * 2
+            + self.unique_patterns.iter().map(Vec::len).sum::<usize>()
+    }
+
     /// Serializes this track descriptor into bytes matching the YSG specification.
+    ///
+    /// # Panics
+    /// Panics if a pattern offset does not fit in 16 bits (track larger than 64 KB).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let p = self.unique_patterns.len();
@@ -776,7 +791,8 @@ impl TrackDescriptor {
         // Offset table: P * 2 bytes
         let mut curr_offset = 1 + seq_len + (p * 2);
         for pat in &self.unique_patterns {
-            let off = curr_offset as u16;
+            let off =
+                u16::try_from(curr_offset).expect("YSG pattern offset exceeds 16-bit format limit");
             bytes.extend_from_slice(&off.to_le_bytes());
             curr_offset += pat.len();
         }
@@ -894,6 +910,28 @@ impl TrackDescriptor {
     }
 }
 
+/// Computes the absolute header offsets of tracks A, B, C and Global from the byte
+/// lengths of the first three tracks.
+///
+/// # Panics
+/// Panics if an offset does not fit in 16 bits. [`YsgFile::from_sequence`] rejects
+/// songs larger than [`YSG_MAX_FILE_SIZE`], so this only fires for a hand-built
+/// `YsgFile` that violates the format limit.
+fn track_offsets(len_a: usize, len_b: usize, len_c: usize) -> [u16; 4] {
+    let to_u16 =
+        |off: usize| u16::try_from(off).expect("YSG track offset exceeds 16-bit format limit");
+    let off_a = YSG_HEADER_SIZE;
+    let off_b = off_a + len_a;
+    let off_c = off_b + len_b;
+    let off_glob = off_c + len_c;
+    [
+        to_u16(off_a),
+        to_u16(off_b),
+        to_u16(off_c),
+        to_u16(off_glob),
+    ]
+}
+
 /// Represents a compiled, relocatable YSG (YM Song) binary container.
 ///
 /// Encapsulates the 20-byte container header and the four decoupled track descriptors
@@ -993,15 +1031,25 @@ impl YsgFile {
         let track_c = TrackDescriptor::from_voice_frames(&track_c_frames, pat_len)?;
         let track_global = TrackDescriptor::from_global_frames(&track_glob_frames, pat_len)?;
 
+        let total_size = YSG_HEADER_SIZE
+            + track_a.byte_len()
+            + track_b.byte_len()
+            + track_c.byte_len()
+            + track_global.byte_len();
+        if total_size > YSG_MAX_FILE_SIZE {
+            return Err(format!(
+                "Compiled song ({total_size} bytes) exceeds the YSG {YSG_MAX_FILE_SIZE}-byte limit; \
+                 try --step 2, a different --pattern-frames, or --max-bytes to truncate"
+            )
+            .into());
+        }
+
         let bytes_a = track_a.to_bytes();
         let bytes_b = track_b.to_bytes();
         let bytes_c = track_c.to_bytes();
         let bytes_glob = track_global.to_bytes();
-
-        let off_a = YSG_HEADER_SIZE as u16;
-        let off_b = off_a + bytes_a.len() as u16;
-        let off_c = off_b + bytes_b.len() as u16;
-        let off_glob = off_c + bytes_c.len() as u16;
+        let [off_a, off_b, off_c, off_glob] =
+            track_offsets(bytes_a.len(), bytes_b.len(), bytes_c.len());
 
         let loop_step = match song.loop_start {
             Some(frame) => {
@@ -1124,10 +1172,8 @@ impl SongFile for YsgFile {
         let bytes_c = self.track_c.to_bytes();
         let bytes_glob = self.track_global.to_bytes();
 
-        let off_a = YSG_HEADER_SIZE as u16;
-        let off_b = off_a + bytes_a.len() as u16;
-        let off_c = off_b + bytes_b.len() as u16;
-        let off_glob = off_c + bytes_c.len() as u16;
+        let [off_a, off_b, off_c, off_glob] =
+            track_offsets(bytes_a.len(), bytes_b.len(), bytes_c.len());
 
         let mut header = self.header.clone();
         header.offset_track_a = off_a;
@@ -1681,5 +1727,115 @@ mod tests {
             diff_count, 0,
             "Audio output differs between original and decompiled Scout!"
         );
+    }
+
+    /// Effective R13 shape at each frame: the last retrigger value seen so far.
+    fn effective_shapes(frames: &[YmFrame]) -> Vec<Option<u8>> {
+        let mut shape = None;
+        frames
+            .iter()
+            .map(|f| {
+                if f.envelope_shape.is_some() {
+                    shape = f.envelope_shape;
+                }
+                shape
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_reused_global_pattern_inherits_envelope_shape_like_source() {
+        // Steps 1-3 and 5 have identical global content and dedupe to one pattern, while
+        // step 4 retriggers a different shape. Playback follows the sequence table in
+        // source order, so step 5 must inherit 0x08 from step 4 exactly as the source does.
+        const PF: usize = 16;
+        let mut frames = Vec::new();
+        for step in 0..6 {
+            for i in 0..PF {
+                let shape = match (step, i) {
+                    (0, 0) => Some(0x0E),
+                    (4, 0) => Some(0x08),
+                    _ => None,
+                };
+                frames.push(YmFrame {
+                    tone_a: Some(300),
+                    volume_a: Some(0x10),
+                    tone_enable_a: Some(true),
+                    envelope_period: Some(100),
+                    envelope_shape: shape,
+                    ..Default::default()
+                });
+            }
+        }
+        let song = YmSequence {
+            name: "env_reuse".to_string(),
+            timing: TimingConfig {
+                master_clock_hz: 1_789_773,
+                frame_rate: SystemHz::Hz50,
+            },
+            priority: 0,
+            loop_start: None,
+            frames,
+        };
+
+        let (file, details) = YsgFile::from_sequence(&song, PF as u8).unwrap();
+        let table = &file.track_global.sequence_table;
+        assert_eq!(
+            table[1], table[5],
+            "Step 5 should reuse step 1's global pattern"
+        );
+        assert_ne!(table[4], table[5]);
+
+        let decompiled = decompile_ysg("env_reuse", &details.bytes).unwrap();
+        assert_eq!(
+            effective_shapes(&song.frames),
+            effective_shapes(&decompiled.frames)
+        );
+        assert_eq!(effective_shapes(&decompiled.frames)[5 * PF], Some(0x08));
+    }
+
+    #[test]
+    fn test_track_byte_len_matches_serialized_len() {
+        let mut track = TrackDescriptor::default();
+        track.push_pattern(vec![1, 2, 3]).unwrap();
+        track.push_empty_pattern();
+        track.push_pattern(vec![4, 5]).unwrap();
+        track.push_pattern(vec![1, 2, 3]).unwrap();
+        assert_eq!(track.byte_len(), track.to_bytes().len());
+    }
+
+    #[test]
+    fn test_oversized_song_is_rejected_not_wrapped() {
+        // Pseudo-random pitches and volumes defeat deduplication, pushing the
+        // compiled file past the 16-bit offset limit.
+        let mut seed: u32 = 0x1234_5678;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed >> 8
+        };
+        let frames: Vec<YmFrame> = (0..12_000)
+            .map(|_| YmFrame {
+                tone_a: Some((next() & 0x0FFF) as u16),
+                volume_a: Some((next() % 15 + 1) as u8),
+                tone_b: Some((next() & 0x0FFF) as u16),
+                volume_b: Some((next() % 15 + 1) as u8),
+                tone_c: Some((next() & 0x0FFF) as u16),
+                volume_c: Some((next() % 15 + 1) as u8),
+                ..Default::default()
+            })
+            .collect();
+        let song = YmSequence {
+            name: "huge".to_string(),
+            timing: TimingConfig {
+                master_clock_hz: 1_789_773,
+                frame_rate: SystemHz::Hz50,
+            },
+            priority: 0,
+            loop_start: None,
+            frames,
+        };
+
+        let err = YsgFile::from_sequence(&song, 64).expect_err("Song should exceed 64 KB");
+        assert!(err.to_string().contains("exceeds the YSG"), "{err}");
     }
 }

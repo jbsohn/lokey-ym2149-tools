@@ -24,7 +24,6 @@ The `lokey-ym-tools` pipeline compiles, auditions, and mixes sound sequences and
 Audio assets are compiled into custom target formats (`.ysg` for songs, `.yfx` for sound effects) to minimize cartridge ROM space and 6502 CPU cycles:
 
 - **Music Format (`.ysg`)**: Relocatable 4-stream container (Voice A, Voice B, Voice C, Global). Uses a 20-byte fixed header, sequence index tables, 16-bit relative pattern offset pointers, and 1-byte run-length idle tokens (`0bbbbbbb`). Empty patterns use the `$FF` sentinel byte. All channel Tone/Noise enables are precomputed at build time into the Global track's R7 mixer updates. The 6502 replayer state requires only 14 bytes of Zero Page (`TYsgPlayerState`).
-  *(Note: The legacy monolithic 14-register delta-mask format was dropped due to large ROM footprints of ~15 KB – 116 KB; the channel-split format yields 50%–75% better compression, bringing typical songs to ~1.7 KB – 18 KB).*
 - **Sound Effects Format (`.yfx`)**: Fixed-width 5-byte frame layout (`PitchLow`, `PitchHigh`, `Volume`, `Control`, `Duration`), enabling low-overhead VBI channel overrides without variable-length parsing.
 
 *(See [File Formats Specification](FileFormats.md) for field offsets and bit allocation tables).*

@@ -55,7 +55,7 @@ impl YmFile {
                     for r in 0..14 {
                         raw16[r] = data[r * frame_count + f];
                     }
-                    raw_frames.push(raw16);
+                    raw_frames.push(Self::sanitize_raw16(&raw16).0);
                 }
 
                 return Ok(Self {
@@ -84,13 +84,10 @@ impl YmFile {
         let mut digidrum_frames = 0usize;
         let mut raw_frames = Vec::with_capacity(total_frames);
         for raw in parsed_frames.into_iter().take(total_frames) {
-            let (reg_14, has_digidrum) = Self::sanitize_raw_frame(&raw);
+            let (sanitized16, has_digidrum) = Self::sanitize_raw16(&raw);
             if has_digidrum {
                 digidrum_frames += 1;
             }
-            let mut sanitized16 = [0u8; 16];
-            sanitized16[0..14].copy_from_slice(&reg_14);
-            sanitized16[13] = raw[13]; // preserve original envelope retrigger indicator
             raw_frames.push(sanitized16);
         }
 
@@ -159,6 +156,16 @@ impl YmFile {
             reg_14[10] = 0;
         }
         (reg_14, has_digidrum)
+    }
+
+    /// Sanitizes a 16-byte raw YM frame in place of its 14 register bytes, preserving the
+    /// original R13 byte (0xFF = no envelope retrigger) and zeroing bytes 14-15.
+    fn sanitize_raw16(raw: &[u8; 16]) -> ([u8; 16], bool) {
+        let (reg_14, has_digidrum) = Self::sanitize_raw_frame(raw);
+        let mut sanitized16 = [0u8; 16];
+        sanitized16[0..14].copy_from_slice(&reg_14);
+        sanitized16[13] = raw[13];
+        (sanitized16, has_digidrum)
     }
 
     /// Converts 14 YM-2149 hardware registers to a `YmFrame`.
@@ -246,5 +253,38 @@ impl SongInput for YmFile {
             loop_start: self.loop_frame,
             frames,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ym3_frames_are_sanitized() {
+        const FRAMES: usize = 2;
+        let mut regs = [[0u8; 14]; FRAMES];
+        regs[0][0] = 0x34;
+        regs[0][1] = 0xF1; // stray high nibble in coarse tone A
+        regs[0][8] = 0x80; // impossible volume value (bits 5-7 set)
+        regs[0][13] = 0x0E;
+        regs[1][13] = 0xFF; // no envelope retrigger
+
+        let mut data = b"YM3!".to_vec();
+        for r in 0..14 {
+            for frame in &regs {
+                data.push(frame[r]);
+            }
+        }
+
+        let ym = YmFile::from_bytes("ym3", &data, None).unwrap();
+        assert_eq!(ym.raw_frames.len(), FRAMES);
+        assert_eq!(ym.raw_frames[0][1], 0x01);
+        assert_eq!(ym.raw_frames[0][8], 0x00);
+
+        let seq = ym.to_sequence(Some(ATARI_ST_CLOCK)).unwrap();
+        assert_eq!(seq.frames[0].tone_a, Some(0x0134));
+        assert_eq!(seq.frames[0].envelope_shape, Some(0x0E));
+        assert_eq!(seq.frames[1].envelope_shape, None);
     }
 }
