@@ -29,54 +29,41 @@ Compiles a source music song (`.ym` or `.json`) into an optimized `.ysg` binary 
 lym song render --input <PATH> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
-| Option           | Flag | Description                                                                                                                                                                                                                                                                                  | Default                |
-|:-----------------|:-----|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----------------------|
-| `--input`        | `-i` | **Required**. Path to input song file (`.ym` chiptune or `.json` source).                                                                                                                                                                                                                    | —                      |
-| `--output`       | `-o` | Output `.ysg` binary path. If omitted, uses input path with `.ysg` extension.                                                                                                                                                                                                                | Same stem + `.ysg`     |
-| `--hz`           |      | Force playback refresh rate override (`50` or `60` Hz).                                                                                                                                                                                                                                      | Source Hz              |
-| `--clock`        |      | Override source/target PSG master clock in Hz (e.g. `1789773` for Atari 7800, `2000000` for Atari ST).                                                                                                                                                                                       | Source clock           |
-| `--target-clock` |      | Target chip clock in Hz that pitches are retuned for (e.g. `2000000` to keep an Atari ST source at native pitch, `1020484` for Apple II Mockingboard/AppleWin — real Mockingboard hardware clocks the AY-3-8910 off the 6502 clock, so notes play back roughly an octave flat without this). | `1789773` (Atari 7800) |
-| `--step`         | `-s` | Decimation window size for temporal frame reduction.                                                                                                                                                                                                                                         | `1`                    |
-| `--compression`  |      | Compression level: `full` (delta + pattern dedup), `delta-only` (no pattern dedup), or `none` (raw 14-register frames).                                                                                                                                                                      | `full`                 |
-| `--no-dedup`     |      | Disable pattern block deduplication.                                                                                                                                                                                                                                                         | `false`                |
-| `--no-rle`       |      | Disable run-length encoding (RLE) for idle frame runs.                                                                                                                                                                                                                                       | `false`                |
-| `--max-bytes`    |      | Truncate trailing patterns to enforce a strict byte limit for tight ROM constraints.                                                                                                                                                                                                         | Unbounded              |
+| Option             | Flag | Description                                                                                                                                                                                                                                                                                  | Default                          |
+|:-------------------|:-----|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------------------------|
+| `--input`          | `-i` | **Required**. Path to input song file (`.ym` chiptune, `.ysg`, or `.json` source).                                                                                                                                                                                                           | —                                |
+| `--output`         | `-o` | Output `.ysg` binary path. If omitted, uses input path with `.ysg` extension.                                                                                                                                                                                                                | Same stem + `.ysg`               |
+| `--hz`             |      | Force playback refresh rate override (`50` or `60` Hz).                                                                                                                                                                                                                                      | Source Hz                        |
+| `--clock`          |      | Override source/target PSG master clock in Hz (e.g. `1789773` for Atari 7800, `2000000` for Atari ST).                                                                                                                                                                                       | Source clock                     |
+| `--target-clock`   |      | Target chip clock in Hz that pitches are retuned for (e.g. `2000000` to keep an Atari ST source at native pitch, `1020484` for Apple II Mockingboard/AppleWin — real Mockingboard hardware clocks the AY-3-8910 off the 6502 clock, so notes play back roughly an octave flat without this). | `1789773` (Atari 7800)           |
+| `--step`           | `-s` | Decimation window size for temporal frame reduction (e.g. `--step 2` reduces 50 Hz to 25 Hz).                                                                                                                                                                                                | `1`                              |
+| `--pattern-frames` |      | Fixed pattern frame chunk size (e.g. 16, 24, 32, 48, 64, 96, 128). If omitted, `lym` automatically tests all candidate sizes and selects the one that minimizes total stream size.                                                                                                          | Automatic optimal search         |
+| `--max-bytes`      |      | Truncate the song, dropping whole patterns from the end, until the compiled `.ysg` fits within `N` bytes. Prints a warning with the number of frames dropped. If the loop point is cut off, the song restarts from the beginning instead.                                                    | No limit                         |
 
 ---
 
-### Compiler Options & Optimization Passes
+### Compiler Architecture & Optimization Passes
 
-`lym song render` provides fine-grained control over compiler optimization passes. You can toggle individual techniques
-or select preset compression levels to balance ROM footprint against 6502 replayer CPU budget:
+`lym song render` applies several pre-computation passes to maximize compression efficiency while keeping 6502 replayer CPU cost minimal:
 
-1. **Preset Compression Levels (`--compression <LEVEL>`)**:
-    * **`full` (Default)**: Enables delta bitmasking, pattern block deduplication, and RLE idle-frame tokens (~60%–85%
-      compression vs raw `.ym`).
-    * **`delta-only`**: Applies delta bitmasking across consecutive frames without pattern block deduplication. Useful
-      for isolating pattern boundary issues.
-    * **`none`**: Disables all compression, emitting raw 14-register values every single frame for baseline diagnostics.
+1. **Automatic Pattern Frame Exploration**:
+   By default, `lym` benchmarks candidate pattern sizes (`[16, 24, 32, 48, 64, 96, 128]`) and automatically selects the size that yields the smallest total compressed binary for the given song. You can override this and lock in a specific pattern size using `--pattern-frames <N>`.
 
-2. **Pattern Block Deduplication (`--no-dedup`)**:
-    * Chunks the song into fixed-length pattern blocks (benchmarking sizes from 8 to 255 frames). Identical blocks are
-      deduplicated into a unique pattern table and indexed by an 8-bit sequence array.
-    * First frame of every pattern block is unconditionally encoded with a full `0x3FFF` register mask for $O (1)$
-      seeking and clean SFX recovery. Pass `--no-dedup` to disable.
+2. **4-Stream Decoupled Architecture**:
+   The compiler separates the song into four independent streams: Voice A, Voice B, Voice C, and Global/Envelope. This allows individual channels to repeat and deduplicate patterns independently.
 
-3. **Idle-Frame Run-Length Encoding (RLE) (`--no-rle`)**:
-    * Collapses runs of 2+ consecutive idle frames into 3-byte RLE tokens (`[0x00, 0x80, N]`), allowing the 6502
-      replayer to skip register writes during silent/idle runs. Pass `--no-rle` to disable.
+3. **Run-Length Idle Frame Skipping**:
+   When a channel sustains a note or remains silent, runs of idle frames (1 to 127 frames) are collapsed into single-byte wait tokens (`0bbbbbbb`). The 6502 replayer handles this in just 12 CPU cycles (`BPL .is_wait`) without reading or writing PSG registers.
 
-4. **Temporal Frame Decimation (`-s, --step <N>`)**:
-    * Merges `N`-frame windows by selecting peak volume and tone values per channel while picking dominant noise and
-      envelope parameters. E.g. `--step 2` downsamples 60 Hz songs to 30 Hz.
+4. **Precomputed Hardware Mixer (R7)**:
+   All tone and noise enables across channels A, B, and C are resolved at build time into precomputed R7 mixer register values in the Global stream. The 6502 replayer writes R7 directly without performing runtime bitmask operations.
 
-5. **Target ROM Size Truncation (`--max-bytes <BYTES>`)**:
-    * Automatically truncates trailing pattern blocks if the compiled payload exceeds a target ROM size constraint.
+5. **Temporal Frame Decimation (`-s, --step <N>`)**:
+   Merges `N`-frame windows by selecting peak volume and tone values per channel while preserving envelope parameters. For long songs exceeding a 32KB flat cartridge ROM budget, `--step 2` reduces the frame count by 50% while scaling the replayer playback rate accumulator step appropriately.
 
-*(For detailed binary specifications of the `.ysg` bitmask structure and header layouts, see
-the [File Formats Specification](FileFormats.md)).*
+*(For detailed binary specifications of the `.ysg` container layout and stream opcodes, see the [File Formats Specification](FileFormats.md)).*
 
 ---
 
@@ -88,7 +75,7 @@ Dumps raw YM2149 register field values for diagnostic inspection and frame analy
 lym song dump --input <PATH> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
 | Option     | Flag | Description                                                        | Default |
 |:-----------|:-----|:-------------------------------------------------------------------|:--------|
@@ -115,13 +102,13 @@ lym song render --input tests/fixtures/song/ND-Loader.ym --output tests/fixtures
 lym song play --input tests/fixtures/song/ND-Loader.ysg
 ```
 
-#### Options:
+#### Options
 
 | Option           | Flag | Description                                                                                      | Default      |
 |:-----------------|:-----|:-------------------------------------------------------------------------------------------------|:-------------|
 | `--input`        | `-i` | **Required**. Path to input song file (`.ym`, `.ysg`, or `.json`).                               | —            |
 | `--hz`           |      | Playback refresh rate override (`50` or `60` Hz).                                                | File default |
-| `--via-sequence` |      | Force `.ym` files to decode through the `YmSequence` pipeline rather than raw VBL sync playback. | `false`      |
+| `--raw`          |      | Play `.ym` files with the raw YM replayer, without interactive seeking controls.                 | `false`      |
 
 ---
 
@@ -136,7 +123,7 @@ a `.yfi` ca65 include file.
 lym sfx render --input <PATH> [OPTIONS]
 ```
 
-#### Options:
+#### Options
 
 | Option     | Flag | Description                                                                   | Default            |
 |:-----------|:-----|:------------------------------------------------------------------------------|:-------------------|
@@ -165,7 +152,7 @@ lym sfx render --input tests/fixtures/sfx/blip.json --output tests/fixtures/sfx/
 lym sfx play --input tests/fixtures/sfx/blip.yfx
 ```
 
-#### Options:
+#### Options
 
 | Option    | Flag | Description                                                               | Default      |
 |:----------|:-----|:--------------------------------------------------------------------------|:-------------|
@@ -185,6 +172,7 @@ conflict arbitration.
 lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 ```
 
+#### Options
 | Option           | Flag | Description                                                                                             | Default                |
 |:-----------------|:-----|:--------------------------------------------------------------------------------------------------------|:-----------------------|
 | `--song`         | `-s` | **Required**. Background song file (`.ysg`, `.ym`, `.json`).                                            | —                      |
@@ -195,7 +183,7 @@ lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 | `--clock`        |      | Source chip clock in Hz.                                                                                | `2000000` (Atari ST)   |
 | `--target-clock` |      | Target chip clock in Hz to scale pitch for (e.g. `2000000` to keep an Atari ST source at native pitch). | `1789773` (Atari 7800) |
 
-#### Interactive Key Controls:
+#### Interactive Key Controls
 
 * `1`–`5`: Trigger YM-2149 sound effects (overlaying/ducking PSG music channels).
 * `6`–`0`, `SPACE`, `Z`, `X`: Trigger Atari TIA sound effects (playing on independent TIA channels 0 and 1 with **zero voice stealing**).

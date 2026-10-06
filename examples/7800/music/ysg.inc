@@ -3,35 +3,31 @@
 ; ca65 / cc65 toolchain
 ; ============================================================
 
-; --- YSG 14-byte file header ---
+; --- YSG 20-byte file container header ---
 .struct TYsgHeader
-    pat_size        .byte       ; frames per pattern block
-    num_unique      .byte       ; unique pattern count
+    magic           .byte 2     ; "YS" (0x59, 0x53) or "YC"
+    version         .byte       ; 0x01
+    pattern_frames  .byte       ; frames per pattern block (e.g. 48)
     seq_len         .byte       ; entries in sequence table
-    loop_pat        .byte       ; sequence index to loop back to (255 = no loop)
-    frame_rate      .dword      ; music frame rate in Hz (u32 LE, typically 50 or 60)
-    master_clk      .dword      ; YM2149 master clock in Hz (u32 LE, e.g. 1789773)
-    last_pat_frames .byte       ; real frames in last seq entry (0 = full pattern)
-    features        .byte       ; compression feature flags (bit0=RLE, bit1=varlen mask)
+    loop_step       .byte       ; sequence step to loop back to (255 = no loop)
+    frame_rate_hz   .word       ; music frame rate in Hz (u16 LE, 50 or 60)
+    master_clock_hz .dword      ; YM2149 master clock in Hz (u32 LE)
+    offset_track_a  .word       ; relative offset to Track A descriptor
+    offset_track_b  .word       ; relative offset to Track B descriptor
+    offset_track_c  .word       ; relative offset to Track C descriptor
+    offset_track_glob .word     ; relative offset to Track Global descriptor
 .endstruct
 
-; --- Player zero-page state (23 bytes) ---
-.struct TPlayerState
-    music_ptr       .addr       ; read pointer into pattern data
-    pat_frames      .byte       ; frames remaining in current pattern
-    seq_idx         .byte       ; current index into sequence table
-    tmp_mask        .word       ; scratch / current frame delta mask
-    pat_table       .addr       ; pointer to offset table
-    pat_base        .addr       ; pointer to pattern data
-    seq_base        .addr       ; pointer to sequence table
-    pat_size        .byte       ; frames per pattern (from header)
-    seq_len         .byte       ; sequence table length (from header)
-    loop_pat        .byte       ; loop sequence index (from header; 255 = no loop)
-    last_pat_frames .byte       ; real frames in last seq entry (0 = full pattern)
-    features        .byte       ; compression feature flags (from header)
-    music_acc       .word       ; rate-conversion accumulator
-    music_delta     .word       ; rate-conversion step per display frame
-    v_frame         .word       ; display frame counter (for visuals)
-    rle_count       .byte       ; remaining idle frames from RLE token
+; --- YSG 14-byte Zero-Page State ---
+.struct TYsgPlayerState
+    ptr_a           .addr       ; Stream read pointer for Track A (2 bytes)
+    ptr_b           .addr       ; Stream read pointer for Track B (2 bytes)
+    ptr_c           .addr       ; Stream read pointer for Track C (2 bytes)
+    ptr_glob        .addr       ; Stream read pointer for Track Global (2 bytes)
+    wait_a          .byte       ; Run-length wait counter for Track A (1 byte)
+    wait_b          .byte       ; Run-length wait counter for Track B (1 byte)
+    wait_c          .byte       ; Run-length wait counter for Track C (1 byte)
+    wait_glob       .byte       ; Run-length wait counter for Track Global (1 byte)
+    pat_frame       .byte       ; Frame countdown within current pattern (1 byte)
+    seq_step        .byte       ; Current sequence step index (1 byte)
 .endstruct
-

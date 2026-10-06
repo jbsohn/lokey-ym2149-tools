@@ -27,7 +27,7 @@ $(BUILD_DIR):
 # Render background song into .ysg payload
 $(BUILD_DIR)/song.ysg: $(SONG_SRC) | $(BUILD_DIR)
 	@echo "  Rendering YSG background song..."
-	@$(LYM) song render --input $< --output $@ --compression full --max-bytes 28672
+	@$(LYM) song render --input $< --output $@
 
 # Copy/render sound effect payload
 $(BUILD_DIR)/pew-x.yfx: $(SFX_SRC) | $(BUILD_DIR)

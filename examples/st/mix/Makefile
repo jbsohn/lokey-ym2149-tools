@@ -43,7 +43,7 @@ $(BUILD_DIR):
 # rescaling for the 7800.
 $(BUILD_DIR)/song.ysg: $(SONG_SRC) | $(BUILD_DIR)
 	@echo "  Rendering YSG background song..."
-	@$(LYM) song render --input $< --output $@ --compression full --target-clock 2000000
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000
 
 $(BUILD_DIR)/sfx_z.yfx: $(SFX_Z_SRC) | $(BUILD_DIR)
 	@echo "  Rendering YFX sound effect (Z key)..."

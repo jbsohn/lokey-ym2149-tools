@@ -2,7 +2,7 @@
 
 This document details the original composers and source attributions for the test songs included in the `lokey-ym2149-tools` repository (`tests/fixtures/song/`).
 
-These tracks serve as benchmark fixtures for testing YM2149/AY-3-8910 audio compilation, delta-compression, and real-time playback engines.
+These tracks serve as benchmark fixtures for testing YM2149/AY-3-8910 audio compilation, channel-split stream compression, and real-time playback engines.
 
 ---
 

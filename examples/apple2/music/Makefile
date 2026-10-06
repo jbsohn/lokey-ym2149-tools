@@ -5,15 +5,15 @@
 BUILD_DIR    := build
 YM_DIR       ?= ../../../tests/fixtures/song
 LYM          ?= ../../../target/release/lym
-CA65         := ca65
-LD65         := ld65
+CA65         ?= $(shell which ca65 2>/dev/null || echo $(HOME)/cc65/bin/ca65)
+LD65         ?= $(shell which ld65 2>/dev/null || echo $(HOME)/cc65/bin/ld65)
 CA65_FLAGS   := -I. -I../include
 LD65_FLAGS   := -C apple2.cfg
 # apple2.cfg reserves $0803-$9600 (the standard safe ceiling below DOS 3.3's
-# resident code/buffers) for player code + song data combined. Player code
-# is ~500 bytes, so budget the rest to the song with a safety margin below
-# ld65's hard segment-overflow check.
-YSG_MAX_BYTES ?= 35000
+# resident code/buffers) for player code + song data combined.
+# Optional: truncate songs whose compiled .ysg exceeds N bytes (unset = no limit).
+YSG_MAX_BYTES ?=
+MAX_BYTES_FLAG = $(if $(YSG_MAX_BYTES),--max-bytes $(YSG_MAX_BYTES))
 TARGET_CLOCK  ?= 1020484
 
 # --- Disk image (DOS 3.3, auto-boots DISK_SONG via a generated HELLO) ---
@@ -65,7 +65,7 @@ help:
 	@echo "Variables:"
 	@echo "  YM_DIR=path            Source directory for .ym files (default: ../../../tests/fixtures/song)"
 	@echo "  LYM=path               Path to lym binary (default: ../../../target/release/lym)"
-	@echo "  YSG_MAX_BYTES=N        Truncate songs longer than N bytes (default: 35000)"
+	@echo "  YSG_MAX_BYTES=N        Truncate songs whose .ysg exceeds N bytes (default: no limit)"
 	@echo "  DISK_SONG=NAME         Song to auto-boot on the disk image (default: ND-Loader)"
 	@echo "  DISK_IMAGE=path        Output disk image path (default: music.dsk)"
 	@echo "  APPLEWIN_TEMPLATE=path DOS 3.3 System Master template to base the disk on"
@@ -77,12 +77,12 @@ $(BUILD_DIR):
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(LYM) song render --input $< --output $@ --compression full --max-bytes $(YSG_MAX_BYTES) --target-clock $(TARGET_CLOCK) \
+	@$(LYM) song render --input $< --output $@ --target-clock $(TARGET_CLOCK) $(MAX_BYTES_FLAG) \
 		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(LYM) song render --input $< --output $@ --compression full --max-bytes $(YSG_MAX_BYTES) --target-clock $(TARGET_CLOCK) \
+	@$(LYM) song render --input $< --output $@ --target-clock $(TARGET_CLOCK) $(MAX_BYTES_FLAG) \
 		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
 
 # --- Assemble player once ---

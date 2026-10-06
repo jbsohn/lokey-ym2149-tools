@@ -64,7 +64,7 @@ main_loop:
         bsr     poll_keyboard
         bsr     update_visuals
 
-        move.w  #MUSIC_DELTA,d0
+        move.w  music_delta,d0
         beq.s   .play_now
         add.w   d0,music_acc
         bcc.s   .skip_play
@@ -145,158 +145,348 @@ update_visuals:
 ; init_music -- initialize player state from YSG header
 ; ----------------------------------------------------------
 init_music:
-        clr.b   seq_idx
-        clr.b   pat_frames
-        clr.b   rle_count
+        clr.b   seq_step
+        clr.b   pat_frame
+        clr.b   wait_a
+        clr.b   wait_b
+        clr.b   wait_c
+        clr.b   wait_glob
         clr.w   music_acc
 
+        move.w  #MUSIC_DELTA,music_delta
+
         lea     music_data,a0
-        move.b  YSG_PAT_SIZE(a0),pat_size
-        move.b  YSG_SEQ_LEN(a0),seq_len
-        move.b  YSG_LOOP_PAT(a0),loop_pat
-        move.b  YSG_LAST_PAT_FRAMES(a0),last_pat_frames
-        move.b  YSG_FEATURES(a0),features
+        move.b  YSG_PAT_FRAMES(a0),pat_frames_def
+        move.b  YSG_SEQ_LEN(a0),seq_len_def
+        move.b  YSG_LOOP_STEP(a0),loop_step_def
 
-        lea     YSG_HEADER_SIZE(a0),a1  ; seq_base = music_data + header size
-        move.l  a1,seq_base
+        ; Adapt music_delta dynamically if header frame_rate_hz is known
+        move.b  YSG_FRAME_RATE_HZ+1(a0),d0
+        lsl.w   #8,d0
+        move.b  YSG_FRAME_RATE_HZ(a0),d0
+        cmp.w   #50,d0
+        bne.s   .not_50
+        move.w  #((50*65536)/DISPLAY_HZ)&$ffff,music_delta
+        bra.s   .delta_done
+.not_50:
+        cmp.w   #60,d0
+        bne.s   .not_60
+        move.w  #((60*65536)/DISPLAY_HZ)&$ffff,music_delta
+        bra.s   .delta_done
+.not_60:
+        cmp.w   #25,d0
+        bne.s   .not_25
+        move.w  #((25*65536)/DISPLAY_HZ)&$ffff,music_delta
+        bra.s   .delta_done
+.not_25:
+        cmp.w   #30,d0
+        bne.s   .delta_done
+        move.w  #((30*65536)/DISPLAY_HZ)&$ffff,music_delta
+.delta_done:
+        rts
+
+; ----------------------------------------------------------
+; load_step_patterns -- resolves track pointers for current seq_step
+; ----------------------------------------------------------
+load_step_patterns:
+        lea     music_data,a0
+
+        ; Track A
+        move.b  YSG_OFFSET_TRACK_A+1(a0),d3
+        lsl.w   #8,d3
+        move.b  YSG_OFFSET_TRACK_A(a0),d3
+        moveq   #8,d2                   ; Volume reg R8
+        lea     ptr_a,a3
+        lea     wait_a,a4
+        bsr.s   setup_voice_track
+
+        ; Track B
+        lea     music_data,a0
+        move.b  YSG_OFFSET_TRACK_B+1(a0),d3
+        lsl.w   #8,d3
+        move.b  YSG_OFFSET_TRACK_B(a0),d3
+        moveq   #9,d2                   ; Volume reg R9
+        lea     ptr_b,a3
+        lea     wait_b,a4
+        bsr.s   setup_voice_track
+
+        ; Track C
+        lea     music_data,a0
+        move.b  YSG_OFFSET_TRACK_C+1(a0),d3
+        lsl.w   #8,d3
+        move.b  YSG_OFFSET_TRACK_C(a0),d3
+        moveq   #10,d2                  ; Volume reg R10
+        lea     ptr_c,a3
+        lea     wait_c,a4
+        bsr.s   setup_voice_track
+
+        ; Track Global
+        lea     music_data,a0
+        move.b  YSG_OFFSET_TRACK_GLOB+1(a0),d3
+        lsl.w   #8,d3
+        move.b  YSG_OFFSET_TRACK_GLOB(a0),d3
+        bsr.s   setup_global_track
+
+        rts
+
+; ----------------------------------------------------------
+; setup_voice_track
+; in:  d2.w = YM volume register (8, 9, or 10)
+;      d3.w = track descriptor offset from music_data (unsigned)
+;      a3   = pointer to ptr_x (long)
+;      a4   = pointer to wait_x (byte)
+; ----------------------------------------------------------
+setup_voice_track:
+        lea     music_data,a1
+        andi.l  #$ffff,d3
+        adda.l  d3,a1                   ; a1 = track descriptor base
 
         moveq   #0,d0
-        move.b  seq_len,d0
-        adda.l  d0,a1                   ; pat_table = seq_base + seq_len
-        move.l  a1,pat_table
+        move.b  seq_step,d0
+        move.b  1(a1,d0.w),d1           ; d1 = pattern index for this step
+
+        cmp.b   #$ff,d1
+        bne.s   .has_pattern
+
+        ; Sentinel empty pattern: silence voice and wait full pattern
+        move.b  d2,PSG_SELECT.w
+        clr.b   PSG_DATA.w
+        move.b  pat_frames_def,(a4)
+        suba.l  a0,a0
+        move.l  a0,(a3)
+        rts
+
+.has_pattern:
+        ; Pattern offset table starts at a1 + 1 + seq_len_def
+        lea     1(a1),a2
+        moveq   #0,d0
+        move.b  seq_len_def,d0
+        adda.l  d0,a2                   ; a2 = start of pattern offset table
 
         moveq   #0,d0
-        move.b  YSG_NUM_UNIQUE(a0),d0
-        lsl.w   #2,d0                   ; d0 = num_unique * 4 (4-byte offset entries)
-        move.l  pat_table,a1
-        adda.w  d0,a1                   ; pat_base = pat_table + num_unique*4
-        move.l  a1,pat_base
+        move.b  d1,d0
+        lsl.l   #1,d0                   ; d0 = pat_idx * 2
+        adda.l  d0,a2                   ; a2 = entry pointer
+
+        move.b  1(a2),d0
+        lsl.w   #8,d0
+        move.b  0(a2),d0
+        andi.l  #$ffff,d0
+        add.l   a1,d0                   ; d0 = absolute stream address
+
+        move.l  d0,(a3)
+        clr.b   (a4)
+        rts
+
+; ----------------------------------------------------------
+; setup_global_track
+; in:  d3.w = global track descriptor offset from music_data
+; ----------------------------------------------------------
+setup_global_track:
+        lea     music_data,a1
+        andi.l  #$ffff,d3
+        adda.l  d3,a1                   ; a1 = global track descriptor base
+
+        moveq   #0,d0
+        move.b  seq_step,d0
+        move.b  1(a1,d0.w),d1           ; d1 = pattern index
+
+        lea     1(a1),a2
+        moveq   #0,d0
+        move.b  seq_len_def,d0
+        adda.l  d0,a2                   ; a2 = pattern offset table
+
+        moveq   #0,d0
+        move.b  d1,d0
+        lsl.l   #1,d0
+        adda.l  d0,a2
+
+        move.b  1(a2),d0
+        lsl.w   #8,d0
+        move.b  0(a2),d0
+        andi.l  #$ffff,d0
+        add.l   a1,d0
+
+        move.l  d0,ptr_glob
+        clr.b   wait_glob
         rts
 
 ; ----------------------------------------------------------
 ; play_frame -- advance one music frame, write YM2149 regs
 ; ----------------------------------------------------------
 play_frame:
-        tst.b   rle_count
-        beq.s   .not_rle_idle
-        subq.b  #1,rle_count
-        subq.b  #1,pat_frames
-        rts
+        tst.b   pat_frame
+        bne.s   .no_advance
 
-.not_rle_idle:
-        tst.b   pat_frames
-        bne     .do_play
-
-        moveq   #0,d0
-        move.b  seq_idx,d0
-        moveq   #0,d1
-        move.b  seq_len,d1
-        cmp.w   d1,d0
-        bcs.s   .load_pattern
+        ; Check if sequence ended
+        move.b  seq_step,d0
+        cmp.b   seq_len_def,d0
+        bcs.s   .advance_step
 
         ; Sequence exhausted -- loop or restart
-        move.b  loop_pat,d0
+        move.b  loop_step_def,d0
         cmp.b   #$ff,d0
         bne.s   .do_loop
-        bsr     init_music              ; no loop point: restart from beginning
-        rts
+        clr.b   d0                      ; no loop point: restart from 0
 .do_loop:
-        move.b  d0,seq_idx
+        move.b  d0,seq_step
 
-.load_pattern:
-        move.l  seq_base,a0
-        moveq   #0,d1
-        move.b  seq_idx,d1
-        move.b  (a0,d1.w),d2            ; pattern index
-        addq.b  #1,seq_idx
+.advance_step:
+        bsr     load_step_patterns
+        addq.b  #1,seq_step
+        move.b  pat_frames_def,pat_frame
 
-        moveq   #0,d1
-        move.b  d2,d1
-        lsl.w   #2,d1                   ; d1 = idx * 4 (4-byte offset entries)
-        move.l  pat_table,a0
-        adda.w  d1,a0
-        bsr     read_le32               ; d0.l = pattern byte offset; a0 += 4
-        add.l   pat_base,d0
-        move.l  d0,music_ptr
+.no_advance:
+        subq.b  #1,pat_frame
 
-        ; Use last_pat_frames for the final sequence entry, pat_size otherwise.
-        tst.b   last_pat_frames
-        beq.s   .use_pat_size
-        moveq   #0,d0
-        move.b  seq_idx,d0
-        moveq   #0,d1
-        move.b  seq_len,d1
-        cmp.w   d1,d0
-        bne.s   .use_pat_size
-        move.b  last_pat_frames,pat_frames
-        bra     .do_play
-.use_pat_size:
-        move.b  pat_size,pat_frames
+        ; ----------------------------------------------------
+        ; Track Global: dispatched FIRST (R7 Mixer, R6 Noise, R11-R13 Env)
+        ; ----------------------------------------------------
+        tst.b   wait_glob
+        beq.s   .read_glob
+        subq.b  #1,wait_glob
+        bra.s   .tick_a
 
-.do_play:
-        subq.b  #1,pat_frames
+.read_glob:
+        movea.l ptr_glob,a0
+        move.b  (a0)+,d0                ; opcode byte
 
-        move.l  music_ptr,a0
-        bsr     read_le16               ; d0.w = delta mask; a0 += 2
-        move.w  d0,d3
-        move.l  a0,music_ptr
+        ; Check bit 7: 0 = wait run, 1 = register update
+        bpl.s   .wait_glob_token
 
-        ; RLE token: features bit0 enables it, mask bit15 flags it.
-        btst    #0,features
-        beq.s   .rle_done
-        btst    #15,d3
-        beq.s   .rle_done
-
-        ; Count byte N -- N further idle frames beyond the current frame
-        move.l  music_ptr,a0
-        move.b  (a0)+,d0
-        move.l  a0,music_ptr
-        move.b  d0,rle_count
-        rts
-
-.rle_done:
-        ; Bit n of the mask corresponds directly to register n
-        moveq   #0,d4
-        move.l  music_ptr,a0
-.reg_loop:
-        btst    d4,d3
-        beq.s   .reg_next
-        move.b  d4,PSG_SELECT.w
+        ; Bit 0: R6 Noise Period
+        btst    #0,d0
+        beq.s   .chk_r7
+        move.b  #6,PSG_SELECT.w
         move.b  (a0)+,PSG_DATA.w
-.reg_next:
-        addq.b  #1,d4
-        cmp.b   #NUM_REGS,d4
-        bne.s   .reg_loop
 
-        move.l  a0,music_ptr
+.chk_r7:
+        ; Bit 1: R7 Mixer
+        btst    #1,d0
+        beq.s   .chk_r11
+        move.b  #7,PSG_SELECT.w
+        move.b  (a0)+,PSG_DATA.w
+
+.chk_r11:
+        ; Bit 2: R11 Env Period LSB
+        btst    #2,d0
+        beq.s   .chk_r12
+        move.b  #11,PSG_SELECT.w
+        move.b  (a0)+,PSG_DATA.w
+
+.chk_r12:
+        ; Bit 3: R12 Env Period MSB
+        btst    #3,d0
+        beq.s   .chk_r13
+        move.b  #12,PSG_SELECT.w
+        move.b  (a0)+,PSG_DATA.w
+
+.chk_r13:
+        ; Bit 4: R13 Env Shape Retrigger
+        btst    #4,d0
+        beq.s   .glob_done
+        move.b  #13,PSG_SELECT.w
+        move.b  (a0)+,PSG_DATA.w
+
+.glob_done:
+        move.l  a0,ptr_glob
+        bra.s   .tick_a
+
+.wait_glob_token:
+        tst.b   d0
+        beq.s   .set_wait_glob
+        subq.b  #1,d0
+.set_wait_glob:
+        move.b  d0,wait_glob
+        move.l  a0,ptr_glob
+
+        ; ----------------------------------------------------
+        ; Voice Tracks A, B, C
+        ; ----------------------------------------------------
+.tick_a:
+        moveq   #0,d1                   ; R0
+        moveq   #1,d2                   ; R1
+        moveq   #8,d3                   ; R8
+        lea     ptr_a,a1
+        lea     wait_a,a2
+        bsr.s   tick_voice
+
+.tick_b:
+        moveq   #2,d1                   ; R2
+        moveq   #3,d2                   ; R3
+        moveq   #9,d3                   ; R9
+        lea     ptr_b,a1
+        lea     wait_b,a2
+        bsr.s   tick_voice
+
+.tick_c:
+        moveq   #4,d1                   ; R4
+        moveq   #5,d2                   ; R5
+        moveq   #10,d3                  ; R10
+        lea     ptr_c,a1
+        lea     wait_c,a2
+        bsr.s   tick_voice
+
         rts
 
 ; ----------------------------------------------------------
-; read_le16 -- little-endian 16-bit read
-; in:  a0 = pointer      out: d0.w = value, a0 advanced by 2
+; tick_voice
+; in:  d1.w = Tone Low Reg (0, 2, 4)
+;      d2.w = Tone High Reg (1, 3, 5)
+;      d3.w = Volume Reg (8, 9, 10)
+;      a1   = pointer to ptr_x
+;      a2   = pointer to wait_x
 ; ----------------------------------------------------------
-read_le16:
-        moveq   #0,d0
-        move.b  1(a0),d0
-        lsl.w   #8,d0
-        move.b  0(a0),d0
-        addq.l  #2,a0
+tick_voice:
+        tst.b   (a2)
+        beq.s   .read_voice
+        subq.b  #1,(a2)
         rts
 
-; ----------------------------------------------------------
-; read_le32 -- little-endian 32-bit read
-; in:  a0 = pointer      out: d0.l = value, a0 advanced by 4
-; ----------------------------------------------------------
-read_le32:
-        moveq   #0,d0
-        move.b  3(a0),d0
-        lsl.l   #8,d0
-        move.b  2(a0),d0
-        lsl.l   #8,d0
-        move.b  1(a0),d0
-        lsl.l   #8,d0
-        move.b  0(a0),d0
-        addq.l  #4,a0
+.read_voice:
+        move.l  (a1),d0
+        beq.s   .voice_done             ; NULL pointer (e.g. empty sentinel pattern)
+        movea.l d0,a0
+        move.b  (a0)+,d0                ; opcode byte
+
+        bpl.s   .wait_voice_token
+
+        ; Bit 6 (L): Tone Low
+        btst    #6,d0
+        beq.s   .chk_tone_hi
+        move.b  d1,PSG_SELECT.w
+        move.b  (a0)+,PSG_DATA.w
+
+.chk_tone_hi:
+        ; Bit 5 (M): Tone High
+        btst    #5,d0
+        beq.s   .chk_vol
+        move.b  d2,PSG_SELECT.w
+        move.b  (a0)+,PSG_DATA.w
+
+.chk_vol:
+        ; Bit 4 (E): Envelope mode vs Volume nibble
+        btst    #4,d0
+        bne.s   .env_mode
+        andi.b  #$0f,d0                 ; volume 0..15
+        bra.s   .write_vol
+.env_mode:
+        moveq   #$10,d0                 ; hardware envelope bit
+.write_vol:
+        move.b  d3,PSG_SELECT.w
+        move.b  d0,PSG_DATA.w
+
+        move.l  a0,(a1)
+        rts
+
+.wait_voice_token:
+        tst.b   d0
+        beq.s   .set_wait_voice
+        subq.b  #1,d0
+.set_wait_voice:
+        move.b  d0,(a2)
+        move.l  a0,(a1)
+.voice_done:
         rts
 
 ; ----------------------------------------------------------
@@ -306,18 +496,24 @@ read_le32:
 
 last_vbl:           ds.l 1
 
-music_ptr:          ds.l 1
-pat_table:          ds.l 1
-pat_base:           ds.l 1
-seq_base:           ds.l 1
-pat_frames:         ds.b 1
-seq_idx:            ds.b 1
-pat_size:           ds.b 1
-seq_len:            ds.b 1
-loop_pat:           ds.b 1
-last_pat_frames:    ds.b 1
-features:           ds.b 1
-rle_count:          ds.b 1
+ptr_a:              ds.l 1
+ptr_b:              ds.l 1
+ptr_c:              ds.l 1
+ptr_glob:           ds.l 1
+
+wait_a:             ds.b 1
+wait_b:             ds.b 1
+wait_c:             ds.b 1
+wait_glob:          ds.b 1
+
+pat_frame:          ds.b 1
+seq_step:           ds.b 1
+pat_frames_def:     ds.b 1
+seq_len_def:        ds.b 1
+loop_step_def:      ds.b 1
+
+                    .even
+music_delta:        ds.w 1
 music_acc:          ds.w 1
 
 saved_palette:      ds.w 16

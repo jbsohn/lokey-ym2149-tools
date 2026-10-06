@@ -47,12 +47,12 @@ $(BUILD_DIR):
 # Target clock is explicit 2,000,000 Hz for Atari ST native YM-2149 pitch
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(LYM) song render --input $< --output $@ --compression full --target-clock 2000000 \
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
 		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
-	@$(LYM) song render --input $< --output $@ --compression full --target-clock 2000000 \
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
 		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
 
 # --- Generate per-song assembly wrapper ---

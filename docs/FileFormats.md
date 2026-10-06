@@ -24,73 +24,92 @@ ratios and timing.
 
 ---
 
-## 2. Music Format Specification (`.ysg`)
+### 2. Music Format Specification (`.ysg`)
 
-The `.ysg` (YM Song) format stores pattern-compressed register data optimized for low CPU overhead on the 6502 CPU and
-bank-switched cartridges.
+The `.ysg` (YM Song) format is a relocatable, 4-stream channel-split binary container optimized for 8-bit microprocessors (such as the 6502 on the Atari 7800 and Apple II Mockingboard). Inspired by the Arkos Tracker AKY streaming format, it decouples PSG channels into independent voice streams, maximizing cross-pattern deduplication while minimizing runtime CPU cycles.
 
-### Header Structure
+#### Compression Architecture
 
-The file begins with a **14-byte fixed header**:
+- **4-Stream Decoupling**: Voice A, Voice B, Voice C, and Global tracks are compressed independently with their own pattern deduplication tables, so a busy channel never prevents the others from idling.
+- **Run-Length Idle Tokens**: 1-byte wait tokens (`0bbbbbbb`) allow inactive or sustained channels to sleep for up to 127 frames without reading or writing PSG registers.
+- **Precomputed Mixer Updates**: Mixer (R7) values are resolved at build time into the Global stream, removing runtime bitmask calculations.
+- **Automatic Pattern Frame Exploration**: The compiler automatically benchmarks candidate pattern sizes (`[16, 24, 32, 48, 64, 96, 128]`) to select the smallest resulting binary.
 
-| Offset   | Size    | Name            | Description                                                          |
-|:---------|:--------|:----------------|:---------------------------------------------------------------------|
-| **0**    | 1 byte  | `PatternSize`   | Number of frames per pattern block (e.g. 64, 96).                    |
-| **1**    | 1 byte  | `NumUnique`     | Total number of unique pattern blocks stored (Max 255).              |
-| **2**    | 1 byte  | `SeqLen`        | Total number of pattern entries in the sequence table (Max 255).     |
-| **3**    | 1 byte  | `LoopPattern`   | Index in the sequence table to loop back to (255 = no loop).         |
-| **4–7**  | 4 bytes | `FrameRateHz`   | Music frame rate in Hz (u32 little-endian, typically 50 or 60).      |
-| **8–11** | 4 bytes | `MasterClkHz`   | YM2149 master clock in Hz (u32 little-endian, e.g. 1789773).         |
-| **12**   | 1 byte  | `LastPatFrames` | Real frame count in the last sequence entry (0 = full pattern).      |
-| **13**   | 1 byte  | `Features`      | Compression feature flags (bit 0 = RLE active, bit 1 = varlen mask). |
+### Container Header Structure (20 Bytes Fixed)
 
-### Sequence Table
+The file begins with a **20-byte fixed header**:
 
-Immediately following the header:
+| Offset   | Size    | Type    | Name                  | Description                                                               |
+|:---------|:--------|:--------|:----------------------|:--------------------------------------------------------------------------|
+| **$00**  | 2 bytes | ASCII   | `Magic`               | Container magic bytes `"YS"` (`0x59, 0x53`).                              |
+| **$02**  | 1 byte  | `u8`    | `Version`             | File format version (`0x01`).                                             |
+| **$03**  | 1 byte  | `u8`    | `PatternFrames`       | Frames per pattern chunk (e.g. 16, 24, 32, 48, 64, 96, 128).             |
+| **$04**  | 1 byte  | `u8`    | `SeqLen`              | Number of pattern steps in the song (Max 255).                            |
+| **$05**  | 1 byte  | `u8`    | `LoopStep`            | Sequence step to loop back to (`255` = no loop).                          |
+| **$06**  | 2 bytes | `u16`LE | `FrameRateHz`         | Playback refresh rate in Hz (`50`, `60`, or custom).                      |
+| **$08**  | 4 bytes | `u32`LE | `MasterClkHz`         | Master chip clock in Hz (e.g. `1789773` for Atari 7800, `2000000` for ST).|
+| **$0C**  | 2 bytes | `u16`LE | `OffsetTrackA`        | Byte offset from header start ($00) to Track A descriptor.                |
+| **$0E**  | 2 bytes | `u16`LE | `OffsetTrackB`        | Byte offset from header start ($00) to Track B descriptor.                |
+| **$10**  | 2 bytes | `u16`LE | `OffsetTrackC`        | Byte offset from header start ($00) to Track C descriptor.                |
+| **$12**  | 2 bytes | `u16`LE | `OffsetTrackGlobal`   | Byte offset from header start ($00) to Track Global descriptor.           |
 
-* **Size**: `SeqLen` bytes.
-* **Format**: Each byte is an index (`0` to `NumUnique - 1`) specifying the playback order of the unique patterns.
+### Track Descriptors
 
-### Pattern Offset Table
+The container houses four independent track descriptors: Voice A, Voice B, Voice C, and Global. Each descriptor has the following layout:
 
-Following the sequence table:
+- **Unique Patterns Count `P` (1 byte)**: Total number of unique patterns stored (0–254).
+- **Sequence Table (`SeqLen` bytes)**: Each byte references a pattern index (`0` to `P - 1`). The special sentinel value `$FF` (`SENTINEL_EMPTY_PATTERN`) denotes an entirely silent/empty pattern; the replayer immediately advances without reading pattern payload bytes.
+- **Pattern Offset Table (`P * 2` bytes)**: Array of 16-bit little-endian relative offsets measured from the start of the track descriptor to each unique pattern's payload.
+- **Pattern Payloads**: The encoded byte streams for each unique pattern.
 
-* **Size**: `NumUnique * 4` bytes.
-* **Format**: Array of 32-bit little-endian pointers.
-* **Reference**: Offsets are relative to the start of the **Pattern Data** block, preventing 64KB ROM boundary wraps for
-  large songs.
+Because every header and pattern offset is 16-bit, a complete `.ysg` file can be at most 65,535 bytes. `lym` refuses to compile a song past that limit; use `--step`, a different `--pattern-frames`, or `--max-bytes` to fit it.
 
-### Pattern Data
+### Stream Encoding & Opcodes
 
-The final block contains the compressed frame streams:
+#### Voice Streams (Channels A, B, C)
 
-* **Format**: Bitmask Deltas with optional RLE tokens.
-* **Normal Frame Structure**:
-    1. **Mask (2 bytes)**: 16-bit little-endian value. Bits 0–13 represent YM2149 registers 0–13. A `1` indicates the
-       register is modified; `0` carries the previous frame's value forward.
-    2. **Payload (Variable)**: The register values corresponding to `1` bits in the mask, packed sequentially.
-* **RLE Token** (when `Features` bit 0 is set): When a run of 2 or more consecutive idle frames occurs, they are
-  replaced by a 3-byte token:
-    1. **Mask (2 bytes)**: `0x00 0x80` — bit 15 set (`0x8000`), all register bits clear.
-    2. **Count (1 byte)**: `N` — represents `N + 1` additional idle frames (total run = `N + 1`).
+Each voice stream updates only its dedicated PSG registers (Voice A: R0, R1, R8; Voice B: R2, R3, R9; Voice C: R4, R5, R10). When reading the next byte:
 
-    * The player reads the count byte, subtracts `N` from its remaining-frame counter, and returns without writing any
-      registers.
-* **Pattern Independence**: The first frame of every pattern block is unconditionally encoded with a full `0x3FFF` mask
-  (resetting all 14 registers), enabling $O (1)$ pattern seeking, looping, and clean SFX channel recovery.
+1. **Wait / Idle Run Token (`0bbbbbbb` — Bit 7 == 0)**:
+   - Bits 6–0 = Wait run length $N$ (1 to 127 frames).
+   - Semantics: Channel state does not change for $N$ frames. Replayer sets `wait_counter = N` and advances pointer by 1.
+2. **Active Register Update Opcode (`1LMEvvvv` — Bit 7 == 1)**:
+   - **Bit 6 (`L`)**: `Period LSB changed`. If 1, next payload byte is Period LSB (R0/R2/R4).
+   - **Bit 5 (`M`)**: `Period MSB changed`. If 1, next payload byte is Period MSB (R1/R3/R5).
+   - **Bit 4 (`E`)**: `Hardware Envelope Mode`.
+     - `0` = Fixed volume. Amplitude is set to bits 3–0 (`vvvv`, 0–15).
+     - `1` = Hardware envelope mode. Amplitude register is set to `$10` (bits 3–0 ignored).
+   - **Bits 3–0 (`vvvv`)**: 4-bit Volume (0–15) when $E=0$.
+   - *Payload order following opcode:* `[Period LSB if L=1] [Period MSB if M=1]`
+
+#### Global / Envelope Stream
+
+The global stream manages Noise Period (R6), Mixer (R7), and Hardware Envelope Period & Shape (R11–R13). All channel Tone and Noise enables are precomputed by the compiler directly into R7, eliminating runtime bitmasking on the 6502.
+
+1. **Wait / Idle Run Token (`0bbbbbbb` — Bit 7 == 0)**:
+   - Bits 6–0 = Wait run length $N$ (1 to 127 frames).
+2. **Active Register Update Opcode (`100SDCBA` — Bit 7 == 1)**:
+   - **Bit 0 (`A`)**: `Noise Period changed`. Payload byte is R6 noise period (0–31).
+   - **Bit 1 (`B`)**: `Mixer changed`. Payload byte is the R7 mixer value.
+   - **Bit 2 (`C`)**: `Envelope Period LSB changed`. Payload byte is R11.
+   - **Bit 3 (`D`)**: `Envelope Period MSB changed`. Payload byte is R12.
+   - **Bit 4 (`S`)**: `Envelope Shape Retrigger`. Payload byte is the R13 shape (0–15). Because writing R13 restarts the hardware envelope, it is only emitted on frames where the source song retriggers the envelope.
+   - **Bits 6–5**: Reserved (0).
+   - *Payload order following opcode:* `[R6 if A=1] [R7 if B=1] [R11 if C=1] [R12 if D=1] [R13 if S=1]`
+   - *Pattern boundary:* the first frame of every pattern always writes R7, plus R6 when noise is enabled and R11/R12 when the envelope is in use, so each pattern sets these registers itself instead of relying on the previous pattern. R13 is only written when the source song retriggers the envelope on that frame.
 
 ---
 
 ## 3. Sound Effects Ingestion & Target Specs
 
-Sound effects are authored as CSV, JSON, or AFX files, and compiled to `.yfx` target binaries.
+Sound effects are authored as CSV, JSON, AFX, or AFB files, and compiled to `.yfx` target binaries. In Rust, these are represented by [`AyfxFile`](../ym-core/src/ayfx.rs) (implementing `SfxInput`) and [`YfxFile`](../ym-core/src/yfx.rs) (implementing `SfxFile` and `SfxInput`).
 
 ### Input Format A: AYFX CSV
 
-Comma-separated values generated by the **AYFXedit** utility:
+Comma-separated values generated by the **ayFX Edit** utility ([ayfxedit-improved](https://github.com/Threetwosevensixseven/ayfxedit-improved) for Windows/Wine, original by [Shiru](https://shiru.untergrund.net/software.shtml), or [Web version by Remy Sharp](https://zx.remysharp.com/audio/#src=MjA4LDMy)):
 
-* **Format**: `ToneEnable,NoiseEnable,TonePeriod,NoisePeriod,Volume`
-* *Note: Enables are active-high in CSV (1 = ON, 0 = OFF), opposite of the physical register bits.*
+- **Format**: `ToneEnable,NoiseEnable,TonePeriod,NoisePeriod,Volume`
+- *Note: Enables are active-high in CSV (1 = ON, 0 = OFF), opposite of the physical register bits.*
 
 ```csv
 0,1,0x8a8,0x1f,0xf
@@ -126,21 +145,29 @@ Designed for hand-authoring and delta-encoded (omitted fields carry forward):
 
 *Note: `sourceClock` (default: 2000000) and `sourceHz` (default: 50) are optional fields.*
 
-### Input Format C: AYFX Binary (`.afx`)
+### Input Format C: AYFX Binary Effect (`.afx`)
 
-Flag-encoded frame updates:
+Flag-encoded frame updates for a single sound effect:
 
-* **Flag Byte**:
-    * **Bits 0–3**: Volume (`0–15`).
-    * **Bit 4**: Disable Tone (`1` = OFF, `0` = ON).
-    * **Bit 5**: Change Tone (if set, `2` bytes of LSB,MSB tone period follow).
-    * **Bit 6**: Change Noise (if set, `1` byte of noise period follows).
-    * **Bit 7**: Disable Noise (`1` = OFF, `0` = ON).
-* **End Marker**: Sequence starting with `0xD0` followed by a byte `>= 0x20` (typically `0xD0 0x20`).
+- **Flag Byte**:
+  - **Bits 0–3**: Volume (`0–15`).
+  - **Bit 4**: Disable Tone (`1` = OFF, `0` = ON).
+  - **Bit 5**: Change Tone (if set, `2` bytes of LSB,MSB tone period follow).
+  - **Bit 6**: Change Noise (if set, `1` byte of noise period follows).
+  - **Bit 7**: Disable Noise (`1` = OFF, `0` = ON).
+- **End Marker**: Sequence starting with `0xD0` followed by a byte `>= 0x20` (typically `0xD0 0x20`).
+
+### Input Format D: AYFX Binary Bank (`.afb`)
+
+Multi-effect binary container holding multiple sound effects:
+
+- **Offset $00**: Number of effects in bank ($N$).
+- **Offsets $01..2N$**: Array of 16-bit little-endian relative pointers to effect data blocks.
+- **Payload**: Concatenated `.afx` effect streams with optional null-terminated string names.
 
 ### Target Output Format (`.yfx`)
 
-Each audio frame is exactly **5 bytes** wide:
+Each audio frame is serialized by [`YfxFile`](../ym-core/src/yfx.rs) into exactly **5 bytes**:
 
 | Byte Offset | Size   | Name        | Description                                                |
 |:------------|:-------|:------------|:-----------------------------------------------------------|
@@ -152,31 +179,28 @@ Each audio frame is exactly **5 bytes** wide:
 
 #### Control Byte Bit Allocation (Byte 3)
 
-* **Bit 0**: Tone Enable (`1` = ON, `0` = OFF — active-high in `.yfx`).
-* **Bit 1**: Noise Enable (`1` = ON, `0` = OFF — active-high in `.yfx`).
-* **Bit 2**: Reserved.
-* **Bits 3–7** (5 bits): Global Noise Period divider (`0` to `31`).
+- **Bit 0**: Tone Enable (`1` = ON, `0` = OFF — active-high in `.yfx`).
+- **Bit 1**: Noise Enable (`1` = ON, `0` = OFF — active-high in `.yfx`).
+- **Bit 2**: Reserved.
+- **Bits 3–7** (5 bits): Global Noise Period divider (`0` to `31`).
 
 ---
 
 ## 4. Assembly Include Sidecars (`.ysi` & `.yfi`)
 
-When `lym song render` or `lym sfx render` compiles binary payloads, it automatically generates ca65 assembly symbol
-definitions (`.ysi` for songs, `.yfi` for SFX):
+When `lym song render` or `lym sfx render` compiles binary payloads, it automatically generates ca65 assembly symbol definitions (`.ysi` for songs, `.yfi` for SFX):
 
 ### `.ysi` Song Header Example
 
 ```ca65
 ; ca65 include generated by lym for ND-Loader.ym
 .scope ND_Loader
-    MAX_FRAMES   = 162
-    PLAYER_HZ    = 50
-    MASTER_CLOCK = 1789773
-    YM_DELAY     = 26
-    YM_FINE      = 117
-    PATTERN_SIZE = 64
-    NUM_PATTERNS = 3
-    SEQ_LEN      = 3
+    MAX_FRAMES     = 515
+    PLAYER_HZ      = 50
+    MASTER_CLOCK   = 1789773
+    PATTERN_FRAMES = 16
+    SEQ_LEN        = 33
+    TOTAL_BYTES    = 1717
 .endscope
 ```
 
@@ -186,12 +210,12 @@ definitions (`.ysi` for songs, `.yfi` for SFX):
 
 Some chiptune features in `.ym` files require special handling or are unsupported for single-chip register streaming:
 
-* **PCM Digi-Drums (YM6)**: High-frequency (4kHz–10kHz) 8-bit PCM samples embedded in Atari ST YM6 files write raw
+- **PCM Digi-Drums (YM6)**: High-frequency (4kHz–10kHz) 8-bit PCM samples embedded in Atari ST YM6 files write raw
   sample values to R8–R10. The compiler automatically detects and silences digi-drum frames to prevent envelope
   corruption on 8-bit CPUs while preserving pitched 3-channel music (square waves, white noise, hardware envelopes) at
   full resolution by default (the `--step` option can optionally decimate frames for extra size savings, at the cost of
   fine musical detail).
-* **`MIX1` (Stereo 2-Chip)**: A stereo format designed by Leonard/STSound that streams to two parallel YM2149 chips
+- **`MIX1` (Stereo 2-Chip)**: A stereo format designed by Leonard/STSound that streams to two parallel YM2149 chips
   simultaneously (6 channels total). Unsupported on single YM2149 hardware.
-* **`YMT1` / `YMT2` (Tracker Pattern Bytecode)**: A compressed tracker format relying on custom 68000/Z80 assembly
+- **`YMT1` / `YMT2` (Tracker Pattern Bytecode)**: A compressed tracker format relying on custom 68000/Z80 assembly
   runtime macros rather than raw register streams. Unsupported.
