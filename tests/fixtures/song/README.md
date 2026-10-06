@@ -1,34 +1,17 @@
-# Music Samples for YM2149 / Atari 7800
+# Music Test Fixtures
 
-This directory contains a curated selection of melodic assets used for testing the YM2149 sound chip interface on the
-Atari 7800.
+Test tracks used for benchmarking YM2149 / AY-3-8910 compilation, compression, and playback engines.
 
 ## Credits & Sourcing
 
-Most of these musical assets were sourced from the excellent **StSound** project. We are deeply grateful to the Atari ST
-community and specifically the authors of StSound for maintaining these high-quality resources.
+Tracks were sourced from the **StSound** collection maintained by **Arnaud Carré (Leonard/OXG)**:
 
-- **Primary Source**: [StSound (Web)](http://leonard.oxg.free.fr/stsound/stsound.html)
-- **GitHub Repository**: [https://github.com/arnaud-carre/StSound](https://github.com/arnaud-carre/StSound)
-- **Author**: **Arnaud Carré (Leonard/OXG)**
+- **Web**: [StSound Project](http://leonard.oxg.free.fr/stsound/stsound.html)
+- **GitHub**: [https://github.com/arnaud-carre/StSound](https://github.com/arnaud-carre/StSound)
 
-## The Vision: ST as Creator, 7800 as Consumer
-
-This project views the **Atari ST** as a powerful **Creation System**. With decades of trackers, composers, and
-high-fidelity music routines, it is a goldmine for audio production.
-
-The **Atari 7800** acts as the **Consumer** of these assets. By bridging the hardware gap with a YM2149 and our
-specialized toolchain, we allow the 7800 to "consume" the rich sonic of the ST, effectively giving the 8-bit
-console the voice of its 16-bit big brother.
-
-## Future Potential
-
-These `.ym` files represent the library of music we hope to make playable on the Atari 7800. Achieving 100% stable
-melodic playback on real hardware remains a work-in-progress.
-
-It is our hope to eventually bring many of these high-fidelity Atari ST tracks to the 7800, proving that the $2 "PSG
-bridge" can deliver a truly premium audio experience on 8-bit hardware.
+See [docs/Musicians.md](../../../docs/Musicians.md) for individual track composer attributions.
 
 ## Disclaimer
 
-These files are included for educational and demonstration purposes only. All copyrights remain with their respective authors.
+These files are included for educational, research, and testing purposes only. All copyrights remain with their original
+authors and composers.
