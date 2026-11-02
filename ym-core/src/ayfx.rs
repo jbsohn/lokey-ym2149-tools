@@ -1,3 +1,4 @@
+use crate::error::YmError;
 use crate::sequence::{SfxFrame, SfxSequence};
 use crate::timing::ZX_SPECTRUM_CLOCK;
 use crate::traits::SfxInput;
@@ -15,7 +16,7 @@ impl AyfxFile {
     ///
     /// # Errors
     /// Returns an error if frame decoding fails.
-    pub fn from_effect(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_effect(name: &str, bytes: &[u8]) -> Result<Self, YmError> {
         let (frames, _) = Self::decode_ayfx_frames(bytes);
         Ok(Self {
             sequences: vec![SfxSequence {
@@ -34,9 +35,9 @@ impl AyfxFile {
     ///
     /// # Errors
     /// Returns an error if the binary payload is empty or offset table pointers are truncated.
-    pub fn from_bank(bank_data: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_bank(bank_data: &[u8]) -> Result<Self, YmError> {
         if bank_data.is_empty() {
-            return Err("Empty bank data".into());
+            return Err(YmError::EmptyBank);
         }
 
         let num_effects = bank_data[0] as usize;
@@ -45,20 +46,26 @@ impl AyfxFile {
         for i in 0..num_effects {
             let offset_ptr = 1 + i * 2;
             if offset_ptr + 1 >= bank_data.len() {
-                break;
+                return Err(YmError::MalformedBank(format!(
+                    "Offset table truncated for effect {i}"
+                )));
             }
             let offset_val = (u16::from(bank_data[offset_ptr])
                 | (u16::from(bank_data[offset_ptr + 1]) << 8))
                 as usize;
             let start_idx = 2 + i * 2 + offset_val;
             if start_idx >= bank_data.len() {
-                continue;
+                return Err(YmError::MalformedBank(format!(
+                    "Effect {i} start offset {start_idx} is out of bounds"
+                )));
             }
 
             let max_len = Self::calculate_ayfx_effect_max_len(bank_data, i, num_effects, start_idx);
             let end_limit = (start_idx + max_len).min(bank_data.len());
             if start_idx >= end_limit {
-                continue;
+                return Err(YmError::MalformedBank(format!(
+                    "Effect {i} length is zero or invalid"
+                )));
             }
 
             let (frames, consumed) = Self::decode_ayfx_frames(&bank_data[start_idx..end_limit]);
@@ -82,7 +89,7 @@ impl AyfxFile {
     ///
     /// # Errors
     /// Returns an error if CSV column values cannot be parsed.
-    pub fn from_csv(name: &str, content: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_csv(name: &str, content: &str) -> Result<Self, YmError> {
         let mut frames = Vec::new();
         for (line_num, line) in content.lines().enumerate() {
             let line = line.trim();
@@ -91,18 +98,16 @@ impl AyfxFile {
             }
             let parts: Vec<&str> = line.split(',').map(str::trim).collect();
             if parts.len() < 5 {
-                return Err(format!(
-                    "Line {}: expected at least 5 columns, found {}",
-                    line_num + 1,
-                    parts.len()
-                )
-                .into());
+                return Err(YmError::MalformedCsv {
+                    line: line_num + 1,
+                    message: format!("expected at least 5 columns, found {}", parts.len()),
+                });
             }
 
             let t = parts[0].parse::<i32>()? != 0;
             let n = parts[1].parse::<i32>()? != 0;
 
-            let parse_val = |s: &str| -> Result<u16, Box<dyn std::error::Error>> {
+            let parse_val = |s: &str| -> Result<u16, YmError> {
                 if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                     Ok(u16::from_str_radix(hex, 16)?)
                 } else {
@@ -225,7 +230,7 @@ impl AyfxFile {
 }
 
 impl SfxInput for AyfxFile {
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>> {
+    fn to_sequences(&self) -> Result<Vec<SfxSequence>, YmError> {
         Ok(self.sequences.clone())
     }
 }

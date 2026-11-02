@@ -7,6 +7,12 @@ pub enum YmError {
     Io(std::io::Error),
     /// JSON serialization or deserialization failed.
     Json(serde_json::Error),
+    /// UTF-8 string decoding failed.
+    Utf8(std::str::Utf8Error),
+    /// Integer parsing failed.
+    ParseInt(std::num::ParseIntError),
+    /// Underling YM replayer failed.
+    Replayer(ym2149_ym_replayer::ReplayerError),
     /// The file magic bytes do not match the expected format identifier.
     InvalidMagic([u8; 2]),
     /// The container format version is unsupported.
@@ -38,14 +44,36 @@ pub enum YmError {
     InvalidPatternFrames,
     /// Sequence length (number of patterns) exceeds the 8-bit maximum (255 steps).
     SongTooLong { patterns: usize, max: usize },
+    /// Compiled song exceeds the YSG maximum file size limit.
+    SongBinaryTooLarge { size: usize, max: usize },
     /// Automated candidate search failed to find a valid pattern frame size.
     NoOptimalPatternFound,
     /// YFX binary length is not a multiple of the 5-byte fixed frame stride.
     InvalidYfxSize(usize),
     /// File extension is not recognized as a supported song or sound effect format.
     UnsupportedExtension(String),
-    /// AYFX sound effect bank payload is empty or malformed.
+    /// YM chiptune format is unsupported.
+    UnsupportedYmFormat(&'static str),
+    /// AYFX sound effect bank payload is empty.
+    EmptyBank,
+    /// AYFX sound effect bank payload is malformed.
     MalformedBank(String),
+    /// AYFX CSV table parsing error.
+    MalformedCsv { line: usize, message: String },
+    /// The file does not begin with the VGM magic `"Vgm "`.
+    InvalidVgmMagic([u8; 4]),
+    /// VGM v1.51+ header has no AY-3-8910 / YM2149 clock, or the clock is zero.
+    MissingAy8910Clock,
+    /// Command byte is not a documented VGM opcode, so the stream can no longer be aligned.
+    UnsupportedVgmCommand(u8),
+    /// Decompressed stream exceeds safety limit.
+    DecompressedTooLarge { max: usize },
+    /// Song contains more playback frames than the safety limit.
+    TooManyFrames { max: usize },
+    /// Requested sound effect bank index is out of bounds.
+    BankIndexOutOfBounds { index: usize, count: usize },
+    /// No sound effects were loaded from input files.
+    NoSfxLoaded,
     /// Generic or informational error message.
     Generic(String),
 }
@@ -55,6 +83,9 @@ impl fmt::Display for YmError {
         match self {
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Json(err) => write!(f, "JSON error: {err}"),
+            Self::Utf8(err) => write!(f, "UTF-8 error: {err}"),
+            Self::ParseInt(err) => write!(f, "Parse int error: {err}"),
+            Self::Replayer(err) => write!(f, "YM replayer error: {err}"),
             Self::InvalidMagic(magic) => write!(
                 f,
                 "Invalid magic header bytes: 0x{:02X}{:02X}",
@@ -98,6 +129,10 @@ impl fmt::Display for YmError {
                 f,
                 "Song length ({patterns} patterns) exceeds maximum {max} steps"
             ),
+            Self::SongBinaryTooLarge { size, max } => write!(
+                f,
+                "Compiled song ({size} bytes) exceeds the YSG {max}-byte limit; try --step 2, a different --pattern-frames, or --max-bytes to truncate"
+            ),
             Self::NoOptimalPatternFound => {
                 write!(f, "Could not find a valid pattern size fitting sequence length limits")
             }
@@ -107,7 +142,34 @@ impl fmt::Display for YmError {
             Self::UnsupportedExtension(ext) => {
                 write!(f, "Unsupported file extension '.{ext}'")
             }
+            Self::UnsupportedYmFormat(msg) => write!(f, "Unsupported YM format: {msg}"),
+            Self::EmptyBank => write!(f, "AYFX sound effect bank is empty"),
             Self::MalformedBank(msg) => write!(f, "Malformed AYFX bank: {msg}"),
+            Self::MalformedCsv { line, message } => {
+                write!(f, "Malformed CSV at line {line}: {message}")
+            }
+            Self::InvalidVgmMagic(magic) => write!(
+                f,
+                "Invalid VGM magic: {:02X} {:02X} {:02X} {:02X}",
+                magic[0], magic[1], magic[2], magic[3]
+            ),
+            Self::MissingAy8910Clock => write!(
+                f,
+                "VGM file has no AY-3-8910 / YM2149 clock (need v1.51+ with a non-zero clock at offset 0x74)"
+            ),
+            Self::UnsupportedVgmCommand(opcode) => {
+                write!(f, "Unsupported VGM command 0x{opcode:02X}")
+            }
+            Self::DecompressedTooLarge { max } => {
+                write!(f, "Decompressed data exceeds {max} bytes safety cap")
+            }
+            Self::TooManyFrames { max } => {
+                write!(f, "Song exceeds {max} playback frames safety cap")
+            }
+            Self::BankIndexOutOfBounds { index, count } => {
+                write!(f, "Bank index {index} out of bounds ({count} effects in bank)")
+            }
+            Self::NoSfxLoaded => write!(f, "No sound effects were loaded"),
             Self::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -118,6 +180,9 @@ impl std::error::Error for YmError {
         match self {
             Self::Io(err) => Some(err),
             Self::Json(err) => Some(err),
+            Self::Utf8(err) => Some(err),
+            Self::ParseInt(err) => Some(err),
+            Self::Replayer(err) => Some(err),
             _ => None,
         }
     }
@@ -135,21 +200,21 @@ impl From<serde_json::Error> for YmError {
     }
 }
 
-impl From<&str> for YmError {
-    fn from(s: &str) -> Self {
-        Self::Generic(s.to_string())
+impl From<std::str::Utf8Error> for YmError {
+    fn from(err: std::str::Utf8Error) -> Self {
+        Self::Utf8(err)
     }
 }
 
-impl From<String> for YmError {
-    fn from(s: String) -> Self {
-        Self::Generic(s)
+impl From<std::num::ParseIntError> for YmError {
+    fn from(err: std::num::ParseIntError) -> Self {
+        Self::ParseInt(err)
     }
 }
 
-impl From<Box<dyn std::error::Error>> for YmError {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        Self::Generic(err.to_string())
+impl From<ym2149_ym_replayer::ReplayerError> for YmError {
+    fn from(err: ym2149_ym_replayer::ReplayerError) -> Self {
+        Self::Replayer(err)
     }
 }
 

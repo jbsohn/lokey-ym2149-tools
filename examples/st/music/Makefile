@@ -8,8 +8,8 @@ LYM          ?= ../../../target/release/lym
 RMAC         := rmac
 RMAC_FLAGS   := -m68000 -p -I. -I../include
 
-YM_SOURCES  := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM)
-YSG_FILES   := $(foreach f,$(YM_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
+SONG_SOURCES := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM) $(wildcard $(YM_DIR)/*.vgm) $(wildcard $(YM_DIR)/*.vgz)
+YSG_FILES    := $(foreach f,$(SONG_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
 TOS_FILES   := $(YSG_FILES:.ysg=.tos)
 
 .PHONY: all ysg clean help ensure-lym
@@ -51,6 +51,16 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
+		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgm | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
+		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgz | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
 	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
 		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }

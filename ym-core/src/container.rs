@@ -2,6 +2,7 @@ use crate::ayfx::AyfxFile;
 use crate::error::YmError;
 use crate::sequence::{SfxSequence, YmSequence};
 use crate::traits::{SfxInput, SongFile, SongInput};
+use crate::vgm_file::VgmFile;
 use crate::yfx::YfxFile;
 use crate::ym_file::YmFile;
 use crate::ysg::YsgFile;
@@ -34,9 +35,7 @@ impl SfxContainer {
     pub fn from_bytes(name: &str, extension: &str, bytes: &[u8]) -> Result<Self, YmError> {
         match extension.to_ascii_lowercase().as_str() {
             "csv" => {
-                let text = std::str::from_utf8(bytes).map_err(|e| {
-                    YmError::Generic(format!("Invalid UTF-8 in CSV sound effect: {e}"))
-                })?;
+                let text = std::str::from_utf8(bytes)?;
                 Ok(Self::Ayfx(AyfxFile::from_csv(name, text)?))
             }
             "afb" => Ok(Self::Ayfx(AyfxFile::from_bank(bytes)?)),
@@ -49,7 +48,7 @@ impl SfxContainer {
 }
 
 impl SfxInput for SfxContainer {
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>> {
+    fn to_sequences(&self) -> Result<Vec<SfxSequence>, YmError> {
         match self {
             Self::Ayfx(f) => f.to_sequences(),
             Self::Yfx(f) => f.to_sequences(),
@@ -62,12 +61,15 @@ impl SfxInput for SfxContainer {
 ///
 /// Encapsulates format detection and byte-level decoding across:
 /// - Raw Arnaud Carré YM chiptune streams (.ym)
+/// - VGM / VGZ register logs, including Furnace Tracker exports (.vgm, .vgz)
 /// - Compiled 20-byte relocatable 4-track YSG files (.ysg)
 /// - Canonical JSON song sequence manifests (.json)
 #[derive(Debug, Clone, PartialEq)]
 pub enum SongContainer {
     /// Raw uncompressed or LHA-compressed YM chiptune dump.
     Ym(YmFile),
+    /// VGM or gzip-compressed VGZ register log (Furnace Tracker and other loggers).
+    Vgm(VgmFile),
     /// Compiled 4-track decoupled YSG song container.
     Ysg(YsgFile),
     /// Canonical JSON song sequence manifest.
@@ -88,6 +90,7 @@ impl SongContainer {
     ) -> Result<Self, YmError> {
         match extension.to_ascii_lowercase().as_str() {
             "ym" => Ok(Self::Ym(YmFile::from_bytes(name, bytes, clock_override)?)),
+            "vgm" | "vgz" => Ok(Self::Vgm(VgmFile::from_bytes(name, bytes, clock_override)?)),
             "ysg" => Ok(Self::Ysg(YsgFile::try_from(bytes)?)),
             "json" => Ok(Self::Json(serde_json::from_slice(bytes)?)),
             _ => Err(YmError::UnsupportedExtension(extension.to_string())),
@@ -102,12 +105,25 @@ impl SongContainer {
         &self,
         name: &str,
         target_clock_override: Option<u32>,
-    ) -> Result<YmSequence, Box<dyn std::error::Error>> {
-        match self {
-            Self::Ym(f) => f.to_sequence(target_clock_override),
-            Self::Ysg(f) => f.to_sequence(name),
-            Self::Json(s) => Ok(s.clone()),
+    ) -> Result<YmSequence, YmError> {
+        let mut seq = match self {
+            Self::Ym(f) => return f.to_sequence(target_clock_override),
+            Self::Vgm(f) => return f.to_sequence(target_clock_override),
+            Self::Ysg(f) => f.to_sequence(name)?,
+            Self::Json(s) => s.clone(),
+        };
+        if let Some(target_clock) = target_clock_override {
+            let target_clock = target_clock.max(1);
+            let source_clock = seq.timing.master_clock_hz.max(1);
+            let ratio = f64::from(target_clock) / f64::from(source_clock);
+            if (ratio - 1.0).abs() > 0.0001 {
+                for frame in &mut seq.frames {
+                    frame.scale_pitch(ratio);
+                }
+                seq.timing.master_clock_hz = target_clock;
+            }
         }
+        Ok(seq)
     }
 }
 
@@ -115,6 +131,7 @@ impl SongInput for SongContainer {
     fn title(&self) -> &str {
         match self {
             Self::Ym(f) => f.title(),
+            Self::Vgm(f) => f.title(),
             Self::Ysg(_) => "song",
             Self::Json(s) => &s.name,
         }
@@ -123,6 +140,7 @@ impl SongInput for SongContainer {
     fn source_clock(&self) -> u32 {
         match self {
             Self::Ym(f) => f.source_clock(),
+            Self::Vgm(f) => f.source_clock(),
             Self::Ysg(f) => f.master_clock_hz(),
             Self::Json(s) => s.timing.master_clock_hz,
         }
@@ -131,15 +149,13 @@ impl SongInput for SongContainer {
     fn source_hz(&self) -> u16 {
         match self {
             Self::Ym(f) => f.source_hz(),
+            Self::Vgm(f) => f.source_hz(),
             Self::Ysg(f) => f.frame_rate_hz(),
             Self::Json(s) => s.timing.frame_rate.hz_value() as u16,
         }
     }
 
-    fn to_sequence(
-        &self,
-        target_clock: Option<u32>,
-    ) -> Result<YmSequence, Box<dyn std::error::Error>> {
+    fn to_sequence(&self, target_clock: Option<u32>) -> Result<YmSequence, YmError> {
         self.to_sequence(self.title(), target_clock)
     }
 }

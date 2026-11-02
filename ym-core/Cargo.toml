@@ -10,6 +10,7 @@ serde_json.workspace = true
 ym2149.workspace = true
 ym2149-ym-replayer.workspace = true
 ym2149-common.workspace = true
+flate2.workspace = true
 
 [lints]
 workspace = true

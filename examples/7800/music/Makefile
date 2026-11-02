@@ -15,8 +15,8 @@ SIGN         := 7800sign
 YSG_MAX_BYTES ?=
 MAX_BYTES_FLAG = $(if $(YSG_MAX_BYTES),--max-bytes $(YSG_MAX_BYTES))
 
-YM_SOURCES  := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM)
-YSG_FILES   := $(foreach f,$(YM_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
+SONG_SOURCES := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM) $(wildcard $(YM_DIR)/*.vgm) $(wildcard $(YM_DIR)/*.vgz)
+YSG_FILES    := $(foreach f,$(SONG_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
 ROM_FILES   := $(YSG_FILES:.ysg=.rom)
 A78_FILES   := $(YSG_FILES:.ysg=.a78)
 
@@ -59,6 +59,14 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*) $(MAX_BYTES_FLAG)
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*) $(MAX_BYTES_FLAG)
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgm | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*) $(MAX_BYTES_FLAG)
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgz | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
 	@$(LYM) song render --input $< --output $@ $(RENDER_FLAGS_$*) $(MAX_BYTES_FLAG)
 

@@ -8,6 +8,7 @@ Tracks were sourced from the **StSound** collection maintained by **Arnaud Carr√
 
 - **Web**: [StSound Project](http://leonard.oxg.free.fr/stsound/stsound.html)
 - **GitHub**: [https://github.com/arnaud-carre/StSound](https://github.com/arnaud-carre/StSound)
+- **VGM Logs**: Modern tracker exports (such as `AY-3-8910_Jam.vgm` from Furnace Tracker) for benchmarking VGM register log ingestion, loop point normalization, and YSG optimal compression.
 
 See [docs/Musicians.md](../../../docs/Musicians.md) for individual track composer attributions.
 

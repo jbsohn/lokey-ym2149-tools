@@ -1,3 +1,4 @@
+use crate::error::YmError;
 use crate::sequence::{YmFrame, YmSequence};
 use crate::timing::{SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK};
 use crate::traits::SongInput;
@@ -37,7 +38,7 @@ impl YmFile {
         name: &str,
         ym_data: &[u8],
         source_clock_override: Option<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, YmError> {
         let decompressed = decompress_if_needed(ym_data)?;
         let uncompressed_len = decompressed.len();
         let source_clock =
@@ -78,8 +79,9 @@ impl YmFile {
             .loop_frame()
             .filter(|&frame| frame < total_frames);
 
-        let parsed_frames = Self::parse_raw_frames(&decompressed)
-            .ok_or("Unsupported YM format: only YM4/YM5/YM6 are supported")?;
+        let parsed_frames = Self::parse_raw_frames(&decompressed).ok_or(
+            YmError::UnsupportedYmFormat("only YM4/YM5/YM6 are supported"),
+        )?;
 
         let mut digidrum_frames = 0usize;
         let mut raw_frames = Vec::with_capacity(total_frames);
@@ -160,12 +162,60 @@ impl YmFile {
 
     /// Sanitizes a 16-byte raw YM frame in place of its 14 register bytes, preserving the
     /// original R13 byte (0xFF = no envelope retrigger) and zeroing bytes 14-15.
-    fn sanitize_raw16(raw: &[u8; 16]) -> ([u8; 16], bool) {
+    pub(crate) fn sanitize_raw16(raw: &[u8; 16]) -> ([u8; 16], bool) {
         let (reg_14, has_digidrum) = Self::sanitize_raw_frame(raw);
         let mut sanitized16 = [0u8; 16];
         sanitized16[0..14].copy_from_slice(&reg_14);
         sanitized16[13] = raw[13];
         (sanitized16, has_digidrum)
+    }
+
+    /// Builds a [`YmSequence`] from already-sanitized 16-byte register frames.
+    ///
+    /// Byte 13 is the envelope shape, or `0xFF` when that frame did not retrigger R13.
+    /// When `target_clock_override` differs from `source_clock`, tone, noise, and
+    /// envelope periods are retuned with [`YmFrame::scale_pitch`].
+    pub(crate) fn sequence_from_raw(
+        name: &str,
+        source_clock: u32,
+        source_hz: u16,
+        loop_frame: Option<usize>,
+        raw_frames: &[[u8; 16]],
+        target_clock_override: Option<u32>,
+    ) -> YmSequence {
+        let target_clock = target_clock_override.unwrap_or(ATARI_7800_CLOCK).max(1);
+        let source_clock = source_clock.max(1);
+        let ratio = f64::from(target_clock) / f64::from(source_clock);
+        let apply_scaling = (ratio - 1.0).abs() > 0.0001;
+
+        let frames: Vec<YmFrame> = raw_frames
+            .iter()
+            .map(|raw| {
+                let mut reg_14 = [0u8; 14];
+                reg_14.copy_from_slice(&raw[0..14]);
+                let mut frame = Self::registers_to_frame(&reg_14);
+                frame.envelope_shape = if raw[13] == 0xFF {
+                    None
+                } else {
+                    Some(raw[13] & 0x0F)
+                };
+                if apply_scaling {
+                    frame.scale_pitch(ratio);
+                }
+                frame
+            })
+            .collect();
+
+        YmSequence {
+            name: name.to_string(),
+            timing: TimingConfig {
+                master_clock_hz: target_clock,
+                frame_rate: SystemHz::Custom(u32::from(source_hz)),
+            },
+            priority: 0,
+            loop_start: loop_frame,
+            frames,
+        }
     }
 
     /// Converts 14 YM-2149 hardware registers to a `YmFrame`.
@@ -215,44 +265,15 @@ impl SongInput for YmFile {
         self.source_hz
     }
 
-    fn to_sequence(
-        &self,
-        target_clock_override: Option<u32>,
-    ) -> Result<YmSequence, Box<dyn std::error::Error>> {
-        let target_clock = target_clock_override.unwrap_or(ATARI_7800_CLOCK).max(1);
-        let source_clock = self.source_clock.max(1);
-        let ratio = f64::from(target_clock) / f64::from(source_clock);
-        let apply_scaling = (ratio - 1.0).abs() > 0.0001;
-
-        let frames: Vec<YmFrame> = self
-            .raw_frames
-            .iter()
-            .map(|raw| {
-                let mut reg_14 = [0u8; 14];
-                reg_14.copy_from_slice(&raw[0..14]);
-                let mut frame = Self::registers_to_frame(&reg_14);
-                frame.envelope_shape = if raw[13] == 0xFF {
-                    None
-                } else {
-                    Some(raw[13] & 0x0F)
-                };
-                if apply_scaling {
-                    frame.scale_pitch(ratio);
-                }
-                frame
-            })
-            .collect();
-
-        Ok(YmSequence {
-            name: self.name.clone(),
-            timing: TimingConfig {
-                master_clock_hz: target_clock,
-                frame_rate: SystemHz::Custom(u32::from(self.source_hz)),
-            },
-            priority: 0,
-            loop_start: self.loop_frame,
-            frames,
-        })
+    fn to_sequence(&self, target_clock_override: Option<u32>) -> Result<YmSequence, YmError> {
+        Ok(Self::sequence_from_raw(
+            &self.name,
+            self.source_clock,
+            self.source_hz,
+            self.loop_frame,
+            &self.raw_frames,
+            target_clock_override,
+        ))
     }
 }
 

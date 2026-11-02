@@ -5,6 +5,7 @@ pub mod player;
 pub mod sequence;
 pub mod timing;
 pub mod traits;
+pub mod vgm_file;
 pub mod yfx;
 pub mod ym_file;
 pub mod ysg;
@@ -19,6 +20,7 @@ pub use timing::{
     ZX_SPECTRUM_CLOCK,
 };
 pub use traits::{SfxFile, SfxInput, SongFile, SongInput};
+pub use vgm_file::VgmFile;
 pub use yfx::YfxFile;
 pub use ym_file::YmFile;
 pub use ysg::{
@@ -425,6 +427,8 @@ mod tests {
 
     #[test]
     fn test_ym_error_display() {
+        use std::error::Error;
+
         let err = YmError::TooManyUniquePatterns {
             count: 256,
             max: 255,
@@ -436,6 +440,22 @@ mod tests {
             actual: 4,
         };
         assert!(err_trunc.to_string().contains("expected 20 bytes"));
+
+        let err_song = YmError::SongBinaryTooLarge {
+            size: 70000,
+            max: 65535,
+        };
+        assert!(err_song.to_string().contains("70000 bytes"));
+
+        let err_csv = YmError::MalformedCsv {
+            line: 4,
+            message: "too short".into(),
+        };
+        assert!(err_csv.to_string().contains("line 4"));
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err_io = YmError::from(io_err);
+        assert!(err_io.source().is_some());
     }
 
     #[test]
@@ -470,5 +490,108 @@ mod tests {
         assert_eq!(container_song.title(), "test_json");
         let decoded = container_song.to_sequence("test_json", None).unwrap();
         assert_eq!(decoded.frames.len(), 1);
+
+        // SongContainer JSON with pitch scaling
+        let song_st = YmSequence {
+            name: "test_st".to_string(),
+            timing: TimingConfig {
+                master_clock_hz: ATARI_ST_CLOCK,
+                frame_rate: SystemHz::Hz50,
+            },
+            priority: 0,
+            loop_start: None,
+            frames: vec![YmFrame {
+                tone_a: Some(2000),
+                volume_a: Some(15),
+                ..Default::default()
+            }],
+        };
+        let st_json = serde_json::to_vec(&song_st).unwrap();
+        let container_st = SongContainer::from_bytes("test_st", "json", &st_json, None).unwrap();
+        let retuned = container_st
+            .to_sequence("test_st", Some(1_000_000))
+            .unwrap();
+        assert_eq!(retuned.frames[0].tone_a, Some(1000));
+        assert_eq!(retuned.timing.master_clock_hz, 1_000_000);
+    }
+
+    #[test]
+    fn test_sfx_duration_in_renderer() {
+        let seq = SfxSequence {
+            name: "dur".to_string(),
+            source_clock: ATARI_ST_CLOCK,
+            source_hz: 50,
+            priority: 0,
+            preferred_channels: None,
+            loop_start: None,
+            frames: vec![
+                SfxFrame {
+                    duration: Some(3),
+                    volume: Some(15),
+                    ..Default::default()
+                },
+                SfxFrame {
+                    duration: Some(1),
+                    volume: Some(10),
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let mut renderer = YmSfxRenderer::new(&seq, 50); // 1 sample per frame
+        let mut sample = [0.0f32; 1];
+
+        // Frame 0: duration = 3 ticks.
+        // Tick 1
+        renderer.render_samples(&mut sample, 1);
+        assert_eq!(renderer.current_frame(), 0);
+        assert!(!renderer.is_finished());
+
+        // Tick 2
+        renderer.render_samples(&mut sample, 1);
+        assert_eq!(renderer.current_frame(), 0);
+        assert!(!renderer.is_finished());
+
+        // Tick 3: finishes frame 0 and advances to frame 1
+        renderer.render_samples(&mut sample, 1);
+        assert_eq!(renderer.current_frame(), 1);
+        assert!(!renderer.is_finished());
+
+        // Tick 4: renders frame 1 and finishes sequence
+        renderer.render_samples(&mut sample, 1);
+        assert!(renderer.is_finished());
+    }
+
+    #[test]
+    fn test_r13_consecutive_retrigger() {
+        let mut chip = ym2149::Ym2149::new();
+        let mut mixer = 0x3F;
+        let mut last_shape = None;
+
+        let frame1 = YmFrame {
+            envelope_shape: Some(0x0E),
+            ..Default::default()
+        };
+        frame1.apply_to_chip(&mut chip, &mut mixer, &mut last_shape);
+        assert_eq!(last_shape, Some(0x0E));
+
+        // Apply identical shape: must write again and keep Some(0x0E)
+        let frame2 = YmFrame {
+            envelope_shape: Some(0x0E),
+            ..Default::default()
+        };
+        frame2.apply_to_chip(&mut chip, &mut mixer, &mut last_shape);
+        assert_eq!(last_shape, Some(0x0E));
+    }
+
+    #[test]
+    fn test_malformed_bank_rejected() {
+        // Truncated bank header
+        let empty: &[u8] = &[];
+        assert!(AyfxFile::from_bank(empty).is_err());
+
+        // 2 effects declared, but only 1 pointer entry present
+        let truncated = vec![2, 1];
+        assert!(AyfxFile::from_bank(&truncated).is_err());
     }
 }

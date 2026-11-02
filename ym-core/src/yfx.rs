@@ -1,3 +1,4 @@
+use crate::error::YmError;
 use crate::sequence::{SfxFrame, SfxSequence};
 use crate::timing::ZX_SPECTRUM_CLOCK;
 use crate::traits::{SfxFile, SfxInput};
@@ -16,11 +17,11 @@ pub struct YfxFile {
 }
 
 impl TryFrom<&[u8]> for YfxFile {
-    type Error = Box<dyn std::error::Error>;
+    type Error = YmError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if !bytes.len().is_multiple_of(5) {
-            return Err("YFX file size must be a multiple of 5".into());
+            return Err(YmError::InvalidYfxSize(bytes.len()));
         }
         Ok(Self {
             bytes: bytes.to_vec(),
@@ -33,7 +34,7 @@ impl YfxFile {
     ///
     /// # Errors
     /// Returns an error if `bytes.len()` is not a multiple of 5.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, YmError> {
         Self::try_from(bytes)
     }
 
@@ -103,7 +104,7 @@ impl SfxFile for YfxFile {
         self.bytes.clone()
     }
 
-    fn to_sequence(&self, name: &str) -> Result<SfxSequence, Box<dyn std::error::Error>> {
+    fn to_sequence(&self, name: &str) -> Result<SfxSequence, YmError> {
         let mut frames = Vec::with_capacity(self.frame_count());
         let mut pp = 0;
 
@@ -143,7 +144,7 @@ impl SfxFile for YfxFile {
 }
 
 impl SfxInput for YfxFile {
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>> {
+    fn to_sequences(&self) -> Result<Vec<SfxSequence>, YmError> {
         let seq = self.to_sequence("sfx")?;
         Ok(vec![seq])
     }

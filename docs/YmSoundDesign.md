@@ -8,6 +8,7 @@ The `lokey-ym-tools` pipeline compiles, auditions, and mixes sound sequences and
 
 - **Music**:
   - `.ym` (Atari ST YM5/YM6 register dumps)
+  - `.vgm` / `.vgz` (VGM register logs, including Furnace Tracker AY-3-8910 / YM2149 exports; `.vgz` and gzipped `.vgm` are inflated first)
   - `.ysg` (Compiled channel-split target binary)
   - `.json` (Hand-authored music sequence source files)
 - **Sound Effects (SFX)**:
@@ -83,14 +84,16 @@ The replayer runs during the Vertical Blanking Interval (VBI). Music streams are
 
 The `ym-core` library decouples ingestion, compilation, and rendering through explicit traits:
 
-### Trait Model
+### Trait Model & Error Handling
+
+All core traits return strongly typed `Result<T, YmError>` errors, providing structured diagnostics (`TruncatedHeader`, `InvalidMagic`, `UnsupportedVersion`, `MissingAy8910Clock`, `UnsupportedVgmCommand`, `BankIndexOutOfBounds`, `SongBinaryTooLarge`, etc.) with chained `std::error::Error::source()` propagation across I/O and format decoders.
 
 - **Music Traits**:
-  - `SongInput`: Implemented by `YmFile` and `YsgFile`. Decodes source files into `YmSequence`.
-  - `SongFile`: Implemented by `YsgFile`. Compiles `YmSequence` into a 4-track channel-split `.ysg` payload and writes to disk.
+  - `SongInput`: Implemented by `YmFile`, `VgmFile`, and `SongContainer`. Decodes a source into `YmSequence`. `.vgm` / `.vgz` logs are sampled to one register frame per tick before that conversion, automatically deduplicating redundant trailing loop wraparound frames and normalizing loop offsets.
+  - `SongFile`: Implemented by `YsgFile`. Compiles `YmSequence` into a 4-track channel-split `.ysg` payload and writes to disk. The stored length is a whole number of patterns; optimal pattern size exploration prioritizes candidates that divide the song without silence padding and align cleanly with the loop point.
 - **SFX Traits**:
-  - `SfxInput`: Implemented by `AyfxFile` and `YfxFile`. Decodes effects into `SfxSequence`.
-  - `SfxFile`: Implemented by `YfxFile`. Compiles `SfxSequence` into 5-byte `.yfx` frames and writes to disk.
+  - `SfxInput`: Implemented by `AyfxFile`, `YfxFile`, and `SfxContainer`. Decodes effects into `SfxSequence`.
+  - `SfxFile`: Implemented by `YfxFile`. Compiles `SfxSequence` into 5-byte `.yfx` frames and writes to disk. Multi-tick `duration` fields are respected by real-time playback renderers (`YmSfxRenderer` and `YmMixer`).
 
 ### Software PSG Emulation & Renderers (`player.rs`)
 

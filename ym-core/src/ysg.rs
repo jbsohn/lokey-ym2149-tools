@@ -1,3 +1,4 @@
+use crate::error::YmError;
 use crate::sequence::{YmFrame, YmSequence};
 use crate::timing::{SystemHz, TimingConfig};
 use crate::traits::SongFile;
@@ -72,19 +73,20 @@ impl YsgHeader {
 }
 
 impl TryFrom<&[u8]> for YsgHeader {
-    type Error = Box<dyn std::error::Error>;
+    type Error = YmError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if bytes.len() < YSG_HEADER_SIZE {
-            return Err("YSG file truncated before header completed".into());
+            return Err(YmError::TruncatedHeader {
+                expected: YSG_HEADER_SIZE,
+                actual: bytes.len(),
+            });
         }
         if bytes[0..2] != YSG_MAGIC {
-            return Err(
-                format!("Invalid YSG magic: expected 'YS', found {:?}", &bytes[0..2]).into(),
-            );
+            return Err(YmError::InvalidMagic([bytes[0], bytes[1]]));
         }
         if bytes[2] != YSG_VERSION {
-            return Err(format!("Unsupported YSG version: {}", bytes[2]).into());
+            return Err(YmError::UnsupportedVersion(bytes[2]));
         }
 
         let pattern_frames = bytes[3];
@@ -116,7 +118,7 @@ impl YsgHeader {
     ///
     /// # Errors
     /// Returns an error if the slice is too short, magic doesn't match, or version is unsupported.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, YmError> {
         Self::try_from(bytes)
     }
 }
@@ -140,10 +142,7 @@ impl VoiceFrame {
     ///
     /// # Errors
     /// Returns an error if the opcode stream is malformed or truncated.
-    pub fn decode_stream(
-        bytes: &[u8],
-        frame_count: usize,
-    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+    pub fn decode_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<Self>, YmError> {
         decode_voice_stream(bytes, frame_count)
     }
 }
@@ -168,10 +167,7 @@ impl GlobalFrame {
     ///
     /// # Errors
     /// Returns an error if the opcode stream is malformed or truncated.
-    pub fn decode_stream(
-        bytes: &[u8],
-        frame_count: usize,
-    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+    pub fn decode_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<Self>, YmError> {
         decode_global_stream(bytes, frame_count)
     }
 }
@@ -418,17 +414,14 @@ pub fn encode_voice_pattern(frames: &[VoiceFrame]) -> Vec<u8> {
 ///
 /// # Errors
 /// Returns an error if the byte stream is truncated or malformed.
-pub fn decode_voice_stream(
-    bytes: &[u8],
-    frame_count: usize,
-) -> Result<Vec<VoiceFrame>, Box<dyn std::error::Error>> {
+pub fn decode_voice_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<VoiceFrame>, YmError> {
     let mut frames = Vec::with_capacity(frame_count);
     let mut current = VoiceFrame::default();
     let mut pp = 0;
 
     while frames.len() < frame_count {
         if pp >= bytes.len() {
-            return Err("Unexpected EOF in voice stream".into());
+            return Err(YmError::UnexpectedEof("voice"));
         }
 
         let b = bytes[pp];
@@ -459,7 +452,7 @@ pub fn decode_voice_stream(
 
         if lsb_changed {
             if pp >= bytes.len() {
-                return Err("Missing LSB period payload byte in voice stream".into());
+                return Err(YmError::MissingPayloadByte("voice tone LSB"));
             }
             let lsb = u16::from(bytes[pp]);
             pp += 1;
@@ -468,7 +461,7 @@ pub fn decode_voice_stream(
 
         if msb_changed {
             if pp >= bytes.len() {
-                return Err("Missing MSB period payload byte in voice stream".into());
+                return Err(YmError::MissingPayloadByte("voice tone MSB"));
             }
             let msb = u16::from(bytes[pp] & 0x0F);
             pp += 1;
@@ -652,17 +645,14 @@ pub fn encode_global_pattern(frames: &[GlobalFrame]) -> Vec<u8> {
 ///
 /// # Errors
 /// Returns an error if the byte stream is truncated or malformed.
-pub fn decode_global_stream(
-    bytes: &[u8],
-    frame_count: usize,
-) -> Result<Vec<GlobalFrame>, Box<dyn std::error::Error>> {
+pub fn decode_global_stream(bytes: &[u8], frame_count: usize) -> Result<Vec<GlobalFrame>, YmError> {
     let mut frames = Vec::with_capacity(frame_count);
     let mut current = GlobalFrame::default();
     let mut pp = 0;
 
     while frames.len() < frame_count {
         if pp >= bytes.len() {
-            return Err("Unexpected EOF in global stream".into());
+            return Err(YmError::UnexpectedEof("global"));
         }
 
         let b = bytes[pp];
@@ -689,21 +679,21 @@ pub fn decode_global_stream(
 
         if r6_changed {
             if pp >= bytes.len() {
-                return Err("Missing R6 payload in global stream".into());
+                return Err(YmError::MissingPayloadByte("global R6"));
             }
             current.noise_period = bytes[pp] & 0x1F;
             pp += 1;
         }
         if r7_changed {
             if pp >= bytes.len() {
-                return Err("Missing R7 payload in global stream".into());
+                return Err(YmError::MissingPayloadByte("global R7"));
             }
             current.mixer = bytes[pp];
             pp += 1;
         }
         if r11_changed {
             if pp >= bytes.len() {
-                return Err("Missing R11 payload in global stream".into());
+                return Err(YmError::MissingPayloadByte("global R11"));
             }
             let lsb = u16::from(bytes[pp]);
             pp += 1;
@@ -711,7 +701,7 @@ pub fn decode_global_stream(
         }
         if r12_changed {
             if pp >= bytes.len() {
-                return Err("Missing R12 payload in global stream".into());
+                return Err(YmError::MissingPayloadByte("global R12"));
             }
             let msb = u16::from(bytes[pp]);
             pp += 1;
@@ -719,7 +709,7 @@ pub fn decode_global_stream(
         }
         if r13_retrigger {
             if pp >= bytes.len() {
-                return Err("Missing R13 payload in global stream".into());
+                return Err(YmError::MissingPayloadByte("global R13"));
             }
             current.envelope_shape = Some(bytes[pp] & 0x0F);
             pp += 1;
@@ -750,12 +740,15 @@ impl TrackDescriptor {
     ///
     /// # Errors
     /// Returns an error if the track exceeds the 255 unique pattern limit (0xFF is reserved for silent patterns).
-    pub fn push_pattern(&mut self, pat_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn push_pattern(&mut self, pat_bytes: Vec<u8>) -> Result<(), YmError> {
         if let Some(idx) = self.unique_patterns.iter().position(|p| p == &pat_bytes) {
             self.sequence_table.push(idx as u8);
         } else {
             if self.unique_patterns.len() >= 0xFF {
-                return Err("Track exceeds maximum of 255 unique patterns".into());
+                return Err(YmError::TooManyUniquePatterns {
+                    count: self.unique_patterns.len(),
+                    max: 254,
+                });
             }
             let idx = self.unique_patterns.len() as u8;
             self.unique_patterns.push(pat_bytes);
@@ -809,9 +802,9 @@ impl TrackDescriptor {
     ///
     /// # Errors
     /// Returns an error if the slice is truncated or offsets are out of bounds.
-    pub fn from_bytes(bytes: &[u8], seq_len: usize) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_bytes(bytes: &[u8], seq_len: usize) -> Result<Self, YmError> {
         if bytes.len() < 1 + seq_len {
-            return Err("Track descriptor truncated before sequence table".into());
+            return Err(YmError::TruncatedTrackDescriptor("Track sequence table"));
         }
         let p = bytes[0] as usize;
         let sequence_table = bytes[1..=seq_len].to_vec();
@@ -819,7 +812,9 @@ impl TrackDescriptor {
         let offset_table_start = 1 + seq_len;
         let offset_table_end = offset_table_start + p * 2;
         if bytes.len() < offset_table_end {
-            return Err("Track descriptor truncated before pattern offset table".into());
+            return Err(YmError::TruncatedTrackDescriptor(
+                "Track pattern offset table",
+            ));
         }
 
         let mut offsets = Vec::with_capacity(p);
@@ -833,7 +828,7 @@ impl TrackDescriptor {
         for i in 0..p {
             let start = offsets[i];
             if start < offset_table_end || start > bytes.len() {
-                return Err("Pattern offset out of bounds".into());
+                return Err(YmError::TrackOffsetOutOfBounds("Track"));
             }
             let end = if i + 1 < p {
                 offsets[i + 1]
@@ -841,7 +836,7 @@ impl TrackDescriptor {
                 bytes.len()
             };
             if end < start || end > bytes.len() {
-                return Err("Invalid pattern payload bounds".into());
+                return Err(YmError::InvalidPatternBounds("Track"));
             }
             unique_patterns.push(bytes[start..end].to_vec());
         }
@@ -877,7 +872,7 @@ impl TrackDescriptor {
     pub fn from_voice_frames(
         frames: &[VoiceFrame],
         pattern_frames: usize,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, YmError> {
         let mut track = Self::default();
 
         for chunk in frames.chunks(pattern_frames) {
@@ -899,7 +894,7 @@ impl TrackDescriptor {
     pub fn from_global_frames(
         frames: &[GlobalFrame],
         pattern_frames: usize,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, YmError> {
         let mut track = Self::default();
 
         for chunk in frames.chunks(pattern_frames) {
@@ -946,7 +941,7 @@ pub struct YsgFile {
 }
 
 impl TryFrom<&[u8]> for YsgFile {
-    type Error = Box<dyn std::error::Error>;
+    type Error = YmError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         let header = YsgHeader::from_bytes(bytes)?;
@@ -958,7 +953,7 @@ impl TryFrom<&[u8]> for YsgFile {
         let off_glob = header.offset_track_global as usize;
 
         if off_a > off_b || off_b > off_c || off_c > off_glob || off_glob > bytes.len() {
-            return Err("Invalid track offsets in YSG header".into());
+            return Err(YmError::TrackOffsetOutOfBounds("Track"));
         }
 
         let track_a = TrackDescriptor::from_bytes(&bytes[off_a..off_b], seq_len)?;
@@ -982,7 +977,7 @@ impl YsgFile {
     /// # Errors
     /// Returns an error if the container is truncated, magic is invalid, or track offsets
     /// and descriptors are malformed.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, YmError> {
         Self::try_from(bytes)
     }
 
@@ -995,12 +990,12 @@ impl YsgFile {
     pub fn from_sequence(
         song: &YmSequence,
         pattern_frames: u8,
-    ) -> Result<(Self, YsgSongDetails), Box<dyn std::error::Error>> {
+    ) -> Result<(Self, YsgSongDetails), YmError> {
         if pattern_frames == 0 {
-            return Err("Pattern frames must be greater than zero".into());
+            return Err(YmError::InvalidPatternFrames);
         }
         if song.frames.is_empty() {
-            return Err("Cannot compile empty song sequence".into());
+            return Err(YmError::EmptySequence);
         }
 
         let pat_len = pattern_frames as usize;
@@ -1018,9 +1013,10 @@ impl YsgFile {
 
         let seq_len = padded_len / pat_len;
         if seq_len > 255 {
-            return Err(
-                format!("Song length ({seq_len} patterns) exceeds maximum 255 steps").into(),
-            );
+            return Err(YmError::SongTooLong {
+                patterns: seq_len,
+                max: 255,
+            });
         }
 
         let (track_a_frames, track_b_frames, track_c_frames, track_glob_frames) =
@@ -1037,11 +1033,10 @@ impl YsgFile {
             + track_c.byte_len()
             + track_global.byte_len();
         if total_size > YSG_MAX_FILE_SIZE {
-            return Err(format!(
-                "Compiled song ({total_size} bytes) exceeds the YSG {YSG_MAX_FILE_SIZE}-byte limit; \
-                 try --step 2, a different --pattern-frames, or --max-bytes to truncate"
-            )
-            .into());
+            return Err(YmError::SongBinaryTooLarge {
+                size: total_size,
+                max: YSG_MAX_FILE_SIZE,
+            });
         }
 
         let bytes_a = track_a.to_bytes();
@@ -1076,15 +1071,24 @@ impl YsgFile {
         };
 
         let file = Self {
-            header,
+            header: header.clone(),
             track_a,
             track_b,
             track_c,
             track_global,
         };
 
+        let mut compiled_bytes = Vec::with_capacity(
+            YSG_HEADER_SIZE + bytes_a.len() + bytes_b.len() + bytes_c.len() + bytes_glob.len(),
+        );
+        compiled_bytes.extend_from_slice(&header.to_bytes());
+        compiled_bytes.extend_from_slice(&bytes_a);
+        compiled_bytes.extend_from_slice(&bytes_b);
+        compiled_bytes.extend_from_slice(&bytes_c);
+        compiled_bytes.extend_from_slice(&bytes_glob);
+
         let details = YsgSongDetails {
-            bytes: file.to_bytes(),
+            bytes: compiled_bytes,
             pattern_frames,
             seq_len: seq_len as u8,
             unique_patterns_a: file.track_a.unique_patterns.len(),
@@ -1105,16 +1109,30 @@ impl YsgFile {
     ///
     /// # Errors
     /// Returns an error if no valid pattern frame size can compress the song.
-    pub fn from_sequence_optimal(
-        song: &YmSequence,
-    ) -> Result<(Self, YsgSongDetails), Box<dyn std::error::Error>> {
+    pub fn from_sequence_optimal(song: &YmSequence) -> Result<(Self, YsgSongDetails), YmError> {
         let mut best: Option<(Self, YsgSongDetails)> = None;
+
+        let is_aligned = |pf: u8| -> bool {
+            let pat_len = pf as usize;
+            song.frames.len().is_multiple_of(pat_len)
+                && song.loop_start.is_none_or(|lf| lf.is_multiple_of(pat_len))
+        };
+
+        let has_aligned_candidate = CANDIDATE_PATTERN_FRAMES.iter().any(|&pf| {
+            let pat_len = pf as usize;
+            let padded_len = song.frames.len().next_multiple_of(pat_len);
+            let seq_len = padded_len / pat_len;
+            seq_len <= 255 && is_aligned(pf)
+        });
 
         for &pf in CANDIDATE_PATTERN_FRAMES {
             let pat_len = pf as usize;
             let padded_len = song.frames.len().next_multiple_of(pat_len);
             let seq_len = padded_len / pat_len;
             if seq_len > 255 {
+                continue;
+            }
+            if has_aligned_candidate && !is_aligned(pf) {
                 continue;
             }
 
@@ -1129,19 +1147,14 @@ impl YsgFile {
             }
         }
 
-        best.ok_or_else(|| {
-            "Could not find a valid pattern size fitting sequence length limits".into()
-        })
+        best.ok_or(YmError::NoOptimalPatternFound)
     }
 
     /// Compiles a [`YmSequence`] into a [`YsgSongDetails`] payload using the specified pattern size.
     ///
     /// # Errors
     /// Returns an error if compression fails or pattern size limits are exceeded.
-    pub fn compile(
-        song: &YmSequence,
-        pattern_frames: u8,
-    ) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+    pub fn compile(song: &YmSequence, pattern_frames: u8) -> Result<YsgSongDetails, YmError> {
         Self::from_sequence(song, pattern_frames).map(|(_, details)| details)
     }
 
@@ -1149,9 +1162,7 @@ impl YsgFile {
     ///
     /// # Errors
     /// Returns an error if no valid pattern size can compress the song.
-    pub fn compile_optimal(
-        song: &YmSequence,
-    ) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+    pub fn compile_optimal(song: &YmSequence) -> Result<YsgSongDetails, YmError> {
         Self::from_sequence_optimal(song).map(|(_, details)| details)
     }
 
@@ -1159,7 +1170,7 @@ impl YsgFile {
     ///
     /// # Errors
     /// Returns an error if the container header or track descriptors are malformed.
-    pub fn decompile(name: &str, bytes: &[u8]) -> Result<YmSequence, Box<dyn std::error::Error>> {
+    pub fn decompile(name: &str, bytes: &[u8]) -> Result<YmSequence, YmError> {
         let file = Self::from_bytes(bytes)?;
         file.to_sequence(name)
     }
@@ -1201,7 +1212,7 @@ impl SongFile for YsgFile {
     }
 
     #[allow(clippy::similar_names, clippy::too_many_lines)]
-    fn to_sequence(&self, name: &str) -> Result<YmSequence, Box<dyn std::error::Error>> {
+    fn to_sequence(&self, name: &str) -> Result<YmSequence, YmError> {
         let seq_len = self.header.seq_len as usize;
         let pat_len = self.header.pattern_frames as usize;
         let total_frames = seq_len * pat_len;
@@ -1217,13 +1228,14 @@ impl SongFile for YsgFile {
             if pat_a == SENTINEL_EMPTY_PATTERN {
                 voice_a.resize(voice_a.len() + pat_len, VoiceFrame::default());
             } else {
-                let pat_bytes = self
-                    .track_a
-                    .unique_patterns
-                    .get(pat_a as usize)
-                    .ok_or_else(|| {
-                        format!("Track A step {s} pattern index {pat_a} out of bounds")
-                    })?;
+                let pat_bytes = self.track_a.unique_patterns.get(pat_a as usize).ok_or(
+                    YmError::InvalidPatternIndex {
+                        track: "Track A",
+                        step: s,
+                        index: pat_a,
+                        unique_count: self.track_a.unique_patterns.len(),
+                    },
+                )?;
                 voice_a.extend(decode_voice_stream(pat_bytes, pat_len)?);
             }
 
@@ -1232,13 +1244,14 @@ impl SongFile for YsgFile {
             if pat_b == SENTINEL_EMPTY_PATTERN {
                 voice_b.resize(voice_b.len() + pat_len, VoiceFrame::default());
             } else {
-                let pat_bytes = self
-                    .track_b
-                    .unique_patterns
-                    .get(pat_b as usize)
-                    .ok_or_else(|| {
-                        format!("Track B step {s} pattern index {pat_b} out of bounds")
-                    })?;
+                let pat_bytes = self.track_b.unique_patterns.get(pat_b as usize).ok_or(
+                    YmError::InvalidPatternIndex {
+                        track: "Track B",
+                        step: s,
+                        index: pat_b,
+                        unique_count: self.track_b.unique_patterns.len(),
+                    },
+                )?;
                 voice_b.extend(decode_voice_stream(pat_bytes, pat_len)?);
             }
 
@@ -1247,13 +1260,14 @@ impl SongFile for YsgFile {
             if pat_c == SENTINEL_EMPTY_PATTERN {
                 voice_c.resize(voice_c.len() + pat_len, VoiceFrame::default());
             } else {
-                let pat_bytes = self
-                    .track_c
-                    .unique_patterns
-                    .get(pat_c as usize)
-                    .ok_or_else(|| {
-                        format!("Track C step {s} pattern index {pat_c} out of bounds")
-                    })?;
+                let pat_bytes = self.track_c.unique_patterns.get(pat_c as usize).ok_or(
+                    YmError::InvalidPatternIndex {
+                        track: "Track C",
+                        step: s,
+                        index: pat_c,
+                        unique_count: self.track_c.unique_patterns.len(),
+                    },
+                )?;
                 voice_c.extend(decode_voice_stream(pat_bytes, pat_len)?);
             }
 
@@ -1266,8 +1280,11 @@ impl SongFile for YsgFile {
                     .track_global
                     .unique_patterns
                     .get(pat_glob as usize)
-                    .ok_or_else(|| {
-                        format!("Track Global step {s} pattern index {pat_glob} out of bounds")
+                    .ok_or(YmError::InvalidPatternIndex {
+                        track: "Track Global",
+                        step: s,
+                        index: pat_glob,
+                        unique_count: self.track_global.unique_patterns.len(),
                     })?;
                 global_frames.extend(decode_global_stream(pat_bytes, pat_len)?);
             }
@@ -1324,10 +1341,7 @@ impl SongFile for YsgFile {
 /// # Errors
 /// Returns an error if the song has no frames, sequence length exceeds 255 steps,
 /// or unique pattern pools exceed capacity.
-pub fn compile_ysg(
-    song: &YmSequence,
-    pattern_frames: u8,
-) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+pub fn compile_ysg(song: &YmSequence, pattern_frames: u8) -> Result<YsgSongDetails, YmError> {
     YsgFile::compile(song, pattern_frames)
 }
 
@@ -1339,9 +1353,7 @@ pub const CANDIDATE_PATTERN_FRAMES: &[u8] = &[16, 24, 32, 48, 64, 96, 128];
 ///
 /// # Errors
 /// Returns an error if no valid pattern frame size can compress the song.
-pub fn compile_ysg_optimal(
-    song: &YmSequence,
-) -> Result<YsgSongDetails, Box<dyn std::error::Error>> {
+pub fn compile_ysg_optimal(song: &YmSequence) -> Result<YsgSongDetails, YmError> {
     YsgFile::compile_optimal(song)
 }
 
@@ -1350,7 +1362,7 @@ pub fn compile_ysg_optimal(
 /// # Errors
 /// Returns an error if header validation fails, track descriptors are corrupted,
 /// or opcode stream payload bytes are malformed.
-pub fn decompile_ysg(name: &str, bytes: &[u8]) -> Result<YmSequence, Box<dyn std::error::Error>> {
+pub fn decompile_ysg(name: &str, bytes: &[u8]) -> Result<YmSequence, YmError> {
     YsgFile::decompile(name, bytes)
 }
 

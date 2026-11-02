@@ -1,3 +1,4 @@
+use crate::error::YmError;
 use crate::timing::TimingConfig;
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +40,7 @@ impl YmSequence {
     ///
     /// # Errors
     /// Returns an error if header validation fails or pattern payloads are corrupted.
-    pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_ysg(name: &str, bytes: &[u8]) -> Result<Self, YmError> {
         use crate::traits::SongFile;
         use crate::ysg::YsgFile;
 
@@ -47,7 +48,7 @@ impl YmSequence {
         file.to_sequence(name)
     }
 
-    /// Loads a `YmSequence` from a file path (.ysg, .ym, or .json).
+    /// Loads a `YmSequence` from a file path (.ysg, .ym, .vgm, .vgz, or .json).
     ///
     /// # Errors
     /// Returns an error if reading the target file from disk fails, or if decoding the
@@ -56,7 +57,7 @@ impl YmSequence {
         input: &std::path::Path,
         clock_override: Option<u32>,
         target_clock_override: Option<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, YmError> {
         use crate::container::SongContainer;
 
         let bytes = std::fs::read(input)?;
@@ -242,15 +243,11 @@ impl YmFrame {
             chip.write_register(12, ((period >> 8) & 0xFF) as u8);
         }
 
-        // Envelope Shape (R13): only write when the value changes.
-        // Same-value writes retrigger the envelope phase, causing audible clicks when the
-        // composer repeats R13 to mark phrase boundaries rather than to intentionally reset.
+        // Envelope Shape (R13): written whenever envelope_shape is Some, resetting phase.
         if let Some(shape) = self.envelope_shape {
             let shape_val = shape & 0x0F;
-            if *last_env_shape != Some(shape_val) {
-                chip.write_register(13, shape_val);
-                *last_env_shape = Some(shape_val);
-            }
+            chip.write_register(13, shape_val);
+            *last_env_shape = Some(shape_val);
         }
     }
 
@@ -435,20 +432,20 @@ impl SfxSequence {
     ///
     /// # Errors
     /// Returns an error if CSV parsing fails or mandatory column fields are missing.
-    pub fn from_ayfx_csv(name: &str, content: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_ayfx_csv(name: &str, content: &str) -> Result<Self, YmError> {
         use crate::ayfx::AyfxFile;
         use crate::traits::SfxInput;
 
         let file = AyfxFile::from_csv(name, content)?;
         let mut seqs = file.to_sequences()?;
-        seqs.pop().ok_or_else(|| "No SFX in CSV".into())
+        seqs.pop().ok_or(YmError::NoSfxLoaded)
     }
 
     /// Parses an AYFX bank binary into a list of `SfxSequences`.
     ///
     /// # Errors
     /// Returns an error if the binary payload is empty or offset table pointers are truncated.
-    pub fn from_ayfx_bank(bank_data: &[u8]) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+    pub fn from_ayfx_bank(bank_data: &[u8]) -> Result<Vec<Self>, YmError> {
         use crate::ayfx::AyfxFile;
         use crate::traits::SfxInput;
 
@@ -460,20 +457,20 @@ impl SfxSequence {
     ///
     /// # Errors
     /// Returns an error if frame decoding fails.
-    pub fn from_ayfx_effect(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_ayfx_effect(name: &str, bytes: &[u8]) -> Result<Self, YmError> {
         use crate::ayfx::AyfxFile;
         use crate::traits::SfxInput;
 
         let file = AyfxFile::from_effect(name, bytes)?;
         let mut seqs = file.to_sequences()?;
-        seqs.pop().ok_or_else(|| "No SFX in effect file".into())
+        seqs.pop().ok_or(YmError::NoSfxLoaded)
     }
 
     /// Parses compiled .yfx binary data into an `SfxSequence`.
     ///
     /// # Errors
     /// Returns an error if the binary size is not a multiple of 5 bytes.
-    pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_yfx(name: &str, bytes: &[u8]) -> Result<Self, YmError> {
         use crate::traits::SfxFile;
         use crate::yfx::YfxFile;
 
@@ -485,22 +482,22 @@ impl SfxSequence {
     ///
     /// # Errors
     /// Returns an error if reading the file fails or the file extension is unsupported.
-    pub fn load_from_path(
-        input: &std::path::Path,
-        bank_index: usize,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let sequences = Self::load_all_from_paths(&[input.to_path_buf()])?;
-        let idx = bank_index.min(sequences.len() - 1);
-        Ok(sequences[idx].clone())
+    pub fn load_from_path(input: &std::path::Path, bank_index: usize) -> Result<Self, YmError> {
+        let mut sequences = Self::load_all_from_paths(&[input.to_path_buf()])?;
+        if bank_index >= sequences.len() {
+            return Err(crate::error::YmError::BankIndexOutOfBounds {
+                index: bank_index,
+                count: sequences.len(),
+            });
+        }
+        Ok(sequences.swap_remove(bank_index))
     }
 
     /// Loads all `SfxSequences` from a list of file paths.
     ///
     /// # Errors
     /// Returns an error if reading any target file fails or decoding any sequence fails.
-    pub fn load_all_from_paths(
-        inputs: &[std::path::PathBuf],
-    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+    pub fn load_all_from_paths(inputs: &[std::path::PathBuf]) -> Result<Vec<Self>, YmError> {
         use crate::container::SfxContainer;
         use crate::traits::SfxInput;
 
@@ -514,7 +511,7 @@ impl SfxSequence {
             sequences.extend(container.to_sequences()?);
         }
         if sequences.is_empty() {
-            return Err("No sound effects were loaded.".into());
+            return Err(YmError::NoSfxLoaded);
         }
         Ok(sequences)
     }

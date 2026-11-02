@@ -6,6 +6,7 @@ use ym2149::{Ym2149, Ym2149Backend};
 pub(crate) struct PlayingSfx {
     frames: Arc<[SfxFrame]>,
     current_idx: usize,
+    ticks_remaining: u8,
 }
 
 fn calculate_samples_per_frame(sample_rate: u32, hz: u32) -> usize {
@@ -178,6 +179,7 @@ pub struct YmSfxRenderer {
     chip: Ym2149,
     frames: Arc<[SfxFrame]>,
     frame_idx: usize,
+    ticks_remaining: u8,
     sample_in_frame: usize,
     samples_per_frame: usize,
     mixer: u8,
@@ -205,10 +207,13 @@ impl YmSfxRenderer {
             frames[0].apply_to_chip(&mut chip, &mut mixer, channel);
         }
 
+        let ticks_remaining = frames.first().and_then(|f| f.duration).unwrap_or(1).max(1);
+
         Self {
             chip,
             frames,
             frame_idx: 0,
+            ticks_remaining,
             sample_in_frame: 0,
             samples_per_frame,
             mixer,
@@ -233,14 +238,20 @@ impl YmSfxRenderer {
             self.sample_in_frame += 1;
             if self.sample_in_frame >= self.samples_per_frame {
                 self.sample_in_frame = 0;
-                self.frame_idx += 1;
 
+                if self.ticks_remaining > 1 {
+                    self.ticks_remaining -= 1;
+                    continue;
+                }
+
+                self.frame_idx += 1;
                 if self.frame_idx >= total_frames {
                     self.finished = true;
                     return;
                 }
 
                 let idx = self.frame_idx;
+                self.ticks_remaining = self.frames[idx].duration.unwrap_or(1).max(1);
                 self.frames[idx].apply_to_chip(&mut self.chip, &mut self.mixer, self.channel);
             }
         }
@@ -364,10 +375,12 @@ impl YmMixer {
             return;
         };
         let target_ch = self.pick_sfx_channel(self.preferred_chan_idx);
+        let ticks_remaining = frames.first().and_then(|f| f.duration).unwrap_or(1).max(1);
 
         self.active_sfx[target_ch] = Some(PlayingSfx {
             frames: Arc::clone(frames),
             current_idx: 0,
+            ticks_remaining,
         });
     }
 
@@ -412,7 +425,19 @@ impl YmMixer {
                                 &mut self.mixer,
                                 YmChannel::from_index(ch),
                             );
-                            active.current_idx += 1;
+                            if active.ticks_remaining > 1 {
+                                active.ticks_remaining -= 1;
+                            } else {
+                                active.current_idx += 1;
+                                if active.current_idx < active.frames.len() {
+                                    active.ticks_remaining = active.frames[active.current_idx]
+                                        .duration
+                                        .unwrap_or(1)
+                                        .max(1);
+                                } else {
+                                    self.active_sfx[ch] = None;
+                                }
+                            }
                         } else {
                             self.active_sfx[ch] = None;
                         }
@@ -476,10 +501,7 @@ impl YmDataRenderer {
     /// # Errors
     ///
     /// Returns an error if decompressing or parsing the YM header fails.
-    pub fn new(
-        ym_data: &[u8],
-        output_sample_rate: u32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(ym_data: &[u8], output_sample_rate: u32) -> Result<Self, crate::error::YmError> {
         use ym2149_common::ChiptunePlayerBase;
         use ym2149_ym_replayer::player::PlaybackController;
 
@@ -532,6 +554,7 @@ mod tests {
         PlayingSfx {
             frames: Arc::from(Vec::<SfxFrame>::new()),
             current_idx: 0,
+            ticks_remaining: 1,
         }
     }
 

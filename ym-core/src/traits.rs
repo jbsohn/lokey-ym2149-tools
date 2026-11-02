@@ -1,6 +1,7 @@
+use crate::error::YmError;
 use crate::sequence::{SfxSequence, YmSequence};
 
-/// Interface for input chiptune formats (.ym, .json, future formats).
+/// Interface for input chiptune formats (.ym, .vgm, .vgz, .json, future formats).
 ///
 /// Any source format that can produce metadata and unroll into the
 /// canonical `YmSequence` IR implements this trait.
@@ -20,10 +21,7 @@ pub trait SongInput {
     ///
     /// # Errors
     /// Returns an error if conversion or pitch retuning fails.
-    fn to_sequence(
-        &self,
-        target_clock: Option<u32>,
-    ) -> Result<YmSequence, Box<dyn std::error::Error>>;
+    fn to_sequence(&self, target_clock: Option<u32>) -> Result<YmSequence, YmError>;
 }
 
 /// Interface for compiled 8-bit replayable song files (.ysg, future targets).
@@ -45,7 +43,7 @@ pub trait SongFile {
     ///
     /// # Errors
     /// Returns an error if pattern streams or track descriptors are corrupted.
-    fn to_sequence(&self, name: &str) -> Result<YmSequence, Box<dyn std::error::Error>>;
+    fn to_sequence(&self, name: &str) -> Result<YmSequence, YmError>;
 }
 
 /// Interface for sound effect input formats (.afx, .afb, .csv, .json, future formats).
@@ -57,7 +55,7 @@ pub trait SfxInput {
     ///
     /// # Errors
     /// Returns an error if parsing or frame decoding fails.
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>>;
+    fn to_sequences(&self) -> Result<Vec<SfxSequence>, YmError>;
 }
 
 /// Interface for compiled 8-bit replayable sound effect files (.yfx, future targets).
@@ -72,5 +70,5 @@ pub trait SfxFile {
     ///
     /// # Errors
     /// Returns an error if the container payload is malformed or corrupted.
-    fn to_sequence(&self, name: &str) -> Result<SfxSequence, Box<dyn std::error::Error>>;
+    fn to_sequence(&self, name: &str) -> Result<SfxSequence, YmError>;
 }

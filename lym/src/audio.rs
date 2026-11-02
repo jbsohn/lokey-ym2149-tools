@@ -128,7 +128,7 @@ impl AudioPlayer {
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] frame {pos}/{len}{msg}",
             )
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("=>-"),
         );
         pb
@@ -138,7 +138,7 @@ impl AudioPlayer {
         let pb = ProgressBar::new(total_deciseconds);
         pb.set_style(
             ProgressStyle::with_template("{spinner:.green} [{bar:40.cyan/blue}] {msg}")
-                .unwrap()
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("=>-"),
         );
         pb
@@ -392,39 +392,42 @@ impl AudioPlayer {
             " Press \u{2190}/\u{2192} to seek, 1-9/0/SPACE to trigger SFX, 'q' to quit (Primary Ch: {preferred_channel:?})"
         ));
 
-        let key_rx = Self::spawn_key_listener();
+        let interactive = Term::stdout().is_term();
+        let key_rx = interactive.then(Self::spawn_key_listener);
         let seek_step_frames = ((song_hz as usize) * 5).max(1);
 
         loop {
-            while let Ok(key) = key_rx.try_recv() {
-                if matches!(key, Key::Char('q' | 'Q')) {
-                    let mut m = mixer
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    m.set_finished(true);
-                    break;
-                }
+            if let Some(ref rx) = key_rx {
+                while let Ok(key) = rx.try_recv() {
+                    if matches!(key, Key::Char('q' | 'Q')) {
+                        let mut m = mixer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        m.set_finished(true);
+                        break;
+                    }
 
-                if matches!(key, Key::ArrowRight | Key::ArrowLeft) {
-                    let mut m = mixer
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let current = m.current_song_frame();
-                    let target = match key {
-                        Key::ArrowRight => current
-                            .saturating_add(seek_step_frames)
-                            .min(total_song_frames.saturating_sub(1)),
-                        Key::ArrowLeft => current.saturating_sub(seek_step_frames),
-                        _ => current,
-                    };
-                    m.seek_song(target);
-                }
+                    if matches!(key, Key::ArrowRight | Key::ArrowLeft) {
+                        let mut m = mixer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let current = m.current_song_frame();
+                        let target = match key {
+                            Key::ArrowRight => current
+                                .saturating_add(seek_step_frames)
+                                .min(total_song_frames.saturating_sub(1)),
+                            Key::ArrowLeft => current.saturating_sub(seek_step_frames),
+                            _ => current,
+                        };
+                        m.seek_song(target);
+                    }
 
-                if let Some(sfx_idx) = Self::key_to_sfx_index(&key) {
-                    let mut m = mixer
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    m.trigger_sfx(sfx_idx);
+                    if let Some(sfx_idx) = Self::key_to_sfx_index(&key) {
+                        let mut m = mixer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        m.trigger_sfx(sfx_idx);
+                    }
                 }
             }
 
@@ -443,7 +446,9 @@ impl AudioPlayer {
         }
 
         pb.finish_with_message("Playback finished.");
-        let _ = std::process::Command::new("stty").arg("sane").status();
+        if key_rx.is_some() {
+            let _ = std::process::Command::new("stty").arg("sane").status();
+        }
         Ok(())
     }
 
