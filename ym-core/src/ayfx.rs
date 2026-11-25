@@ -1,37 +1,25 @@
 use crate::error::YmError;
 use crate::sequence::{SfxFrame, SfxSequence};
-use crate::timing::ZX_SPECTRUM_CLOCK;
-use crate::traits::SfxInput;
 
-/// Represents an AYFX sound effect source (.afx single effect, .afb bank, or .csv export).
-///
-/// Implements `SfxInput` to produce canonical `SfxSequence` instances.
-#[derive(Debug, Clone, PartialEq)]
+/// Represents an AYFX sound effect source (`.afx` single effect, `.afb` bank, or `.csv` export).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AyfxFile {
     pub sequences: Vec<SfxSequence>,
 }
 
 impl AyfxFile {
-    /// Parses a single AYFX effect binary (.afx) into an `AyfxFile`.
+    /// Parses a single AYFX effect binary (`.afx`) into an `AyfxFile`.
     ///
     /// # Errors
     /// Returns an error if frame decoding fails.
     pub fn from_effect(name: &str, bytes: &[u8]) -> Result<Self, YmError> {
         let (frames, _) = Self::decode_ayfx_frames(bytes);
         Ok(Self {
-            sequences: vec![SfxSequence {
-                name: name.to_string(),
-                source_clock: ZX_SPECTRUM_CLOCK,
-                source_hz: 50,
-                priority: 1,
-                preferred_channels: None,
-                loop_start: None,
-                frames,
-            }],
+            sequences: vec![SfxSequence::new(name, frames)],
         })
     }
 
-    /// Parses an AYFX bank binary (.afb) containing multiple sound effects.
+    /// Parses an AYFX bank binary (`.afb`) containing multiple sound effects.
     ///
     /// # Errors
     /// Returns an error if the binary payload is empty or offset table pointers are truncated.
@@ -71,21 +59,16 @@ impl AyfxFile {
             let (frames, consumed) = Self::decode_ayfx_frames(&bank_data[start_idx..end_limit]);
             let name = Self::parse_ayfx_effect_name(bank_data, start_idx + consumed, end_limit, i);
 
-            sequences.push(SfxSequence {
-                name,
-                source_clock: ZX_SPECTRUM_CLOCK,
-                source_hz: 50,
-                priority: 1,
-                preferred_channels: None,
-                loop_start: None,
-                frames,
-            });
+            sequences.push(SfxSequence::new(name, frames));
         }
 
         Ok(Self { sequences })
     }
 
-    /// Parses an AYFX CSV table (.csv) into an `AyfxFile`.
+    /// Parses an AYFX CSV table (`.csv`) into an `AyfxFile`.
+    ///
+    /// Supports standard 5-column `AYFXEdit` exports (`ToneEnable,NoiseEnable,Tone,Noise,Volume`)
+    /// as well as an optional 6th `Duration` column (in ticks, defaulting to `1`).
     ///
     /// # Errors
     /// Returns an error if CSV column values cannot be parsed.
@@ -97,10 +80,10 @@ impl AyfxFile {
                 continue;
             }
             let parts: Vec<&str> = line.split(',').map(str::trim).collect();
-            if parts.len() < 5 {
+            if parts.len() < 5 || parts.len() > 6 {
                 return Err(YmError::MalformedCsv {
                     line: line_num + 1,
-                    message: format!("expected at least 5 columns, found {}", parts.len()),
+                    message: format!("expected 5 or 6 columns, found {}", parts.len()),
                 });
             }
 
@@ -118,21 +101,30 @@ impl AyfxFile {
             let tone = parse_val(parts[2])?;
             let noise = (parse_val(parts[3])? & 0x1F) as u8;
             let volume = (parse_val(parts[4])? & 0x1F) as u8;
+            let duration = if let Some(&dur_str) = parts.get(5).filter(|s| !s.is_empty()) {
+                let dur = parse_val(dur_str)?;
+                if dur == 0 || dur > 255 {
+                    return Err(YmError::MalformedCsv {
+                        line: line_num + 1,
+                        message: format!("duration '{dur_str}' must be in 1..=255"),
+                    });
+                }
+                dur as u8
+            } else {
+                1
+            };
 
-            frames.push(SfxFrame::new(t, n, tone, noise, volume, 1));
+            frames.push(SfxFrame::new(t, n, tone, noise, volume, duration));
         }
 
         Ok(Self {
-            sequences: vec![SfxSequence {
-                name: name.to_string(),
-                source_clock: ZX_SPECTRUM_CLOCK,
-                source_hz: 50,
-                priority: 1,
-                preferred_channels: None,
-                loop_start: None,
-                frames,
-            }],
+            sequences: vec![SfxSequence::new(name, frames)],
         })
+    }
+
+    /// Returns a cloned list of decoded sound effect sequences.
+    pub fn to_sequences(&self) -> Vec<SfxSequence> {
+        self.sequences.clone()
     }
 
     /// Decodes AYFX frame bitstream data.
@@ -194,12 +186,11 @@ impl AyfxFile {
                     | (u16::from(bank_data[next_ptr + 1]) << 8))
                     as usize;
                 let next_start_idx = 4 + i * 2 + next_offset_val;
-                if next_start_idx <= bank_data.len() {
-                    if let Some(diff) = next_start_idx.checked_sub(start_idx) {
-                        if diff > 0 {
-                            return diff;
-                        }
-                    }
+                if next_start_idx <= bank_data.len()
+                    && let Some(diff) = next_start_idx.checked_sub(start_idx)
+                    && diff > 0
+                {
+                    return diff;
                 }
             }
         }
@@ -219,18 +210,12 @@ impl AyfxFile {
                 name_bytes.push(bank_data[pp]);
                 pp += 1;
             }
-            if !name_bytes.is_empty() {
-                if let Ok(decoded_name) = String::from_utf8(name_bytes) {
-                    return decoded_name;
-                }
+            if !name_bytes.is_empty()
+                && let Ok(decoded_name) = String::from_utf8(name_bytes)
+            {
+                return decoded_name;
             }
         }
         format!("sfx_{}", fallback_idx + 1)
-    }
-}
-
-impl SfxInput for AyfxFile {
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, YmError> {
-        Ok(self.sequences.clone())
     }
 }

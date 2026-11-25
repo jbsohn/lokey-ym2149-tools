@@ -1,7 +1,6 @@
 use crate::error::YmError;
 use crate::sequence::{YmFrame, YmSequence};
-use crate::timing::{SystemHz, TimingConfig};
-use crate::traits::SongFile;
+use crate::timing::TimingConfig;
 
 /// The fixed size in bytes of the YSG container header.
 pub const YSG_HEADER_SIZE: usize = 20;
@@ -1062,7 +1061,7 @@ impl YsgFile {
             pattern_frames,
             seq_len: seq_len as u8,
             loop_step,
-            frame_rate_hz: song.timing.frame_rate.hz_value() as u16,
+            frame_rate_hz: song.timing.frame_rate as u16,
             master_clock_hz: song.timing.master_clock_hz,
             offset_track_a: off_a,
             offset_track_b: off_b,
@@ -1174,10 +1173,8 @@ impl YsgFile {
         let file = Self::from_bytes(bytes)?;
         file.to_sequence(name)
     }
-}
-
-impl SongFile for YsgFile {
-    fn to_bytes(&self) -> Vec<u8> {
+    /// Serializes this YSG container into its on-disk binary byte representation.
+    pub fn to_bytes(&self) -> Vec<u8> {
         let bytes_a = self.track_a.to_bytes();
         let bytes_b = self.track_b.to_bytes();
         let bytes_c = self.track_c.to_bytes();
@@ -1203,16 +1200,22 @@ impl SongFile for YsgFile {
         out
     }
 
-    fn frame_rate_hz(&self) -> u16 {
+    /// Native playback frame rate in Hz.
+    pub fn frame_rate_hz(&self) -> u16 {
         self.header.frame_rate_hz
     }
 
-    fn master_clock_hz(&self) -> u32 {
+    /// Target hardware master clock in Hz.
+    pub fn master_clock_hz(&self) -> u32 {
         self.header.master_clock_hz
     }
 
+    /// Decompiles the compressed patterns and tracks back into a [`YmSequence`].
+    ///
+    /// # Errors
+    /// Returns an error if pattern streams or track descriptors are corrupted.
     #[allow(clippy::similar_names, clippy::too_many_lines)]
-    fn to_sequence(&self, name: &str) -> Result<YmSequence, YmError> {
+    pub fn to_sequence(&self, name: &str) -> Result<YmSequence, YmError> {
         let seq_len = self.header.seq_len as usize;
         let pat_len = self.header.pattern_frames as usize;
         let total_frames = seq_len * pat_len;
@@ -1313,7 +1316,6 @@ impl SongFile for YsgFile {
                 noise_enable_c: Some((glob.mixer & 0x20) == 0),
                 envelope_period: Some(glob.envelope_period),
                 envelope_shape: glob.envelope_shape,
-                duration: None,
             });
         }
 
@@ -1325,11 +1327,10 @@ impl SongFile for YsgFile {
 
         Ok(YmSequence {
             name: name.to_string(),
-            timing: TimingConfig {
-                master_clock_hz: self.header.master_clock_hz,
-                frame_rate: SystemHz::Custom(u32::from(self.header.frame_rate_hz)),
-            },
-            priority: 0,
+            timing: TimingConfig::new(
+                self.header.master_clock_hz,
+                u32::from(self.header.frame_rate_hz),
+            ),
             loop_start,
             frames,
         })
@@ -1370,7 +1371,6 @@ pub fn decompile_ysg(name: &str, bytes: &[u8]) -> Result<YmSequence, YmError> {
 mod tests {
     use super::*;
     use crate::player::YmSongRenderer;
-    use crate::traits::SongInput;
 
     fn assert_round_trip_frames_match(expected: &[YmFrame], actual: &[YmFrame]) {
         for (idx, (orig, dec)) in expected.iter().zip(actual.iter()).enumerate() {
@@ -1579,11 +1579,7 @@ mod tests {
 
         let song = YmSequence {
             name: "test_ysg".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: 1_789_773,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
+            timing: TimingConfig::new(1_789_773, 50),
             loop_start: Some(48),
             frames,
         };
@@ -1600,7 +1596,7 @@ mod tests {
         assert_eq!(decompiled.frames.len(), 96);
         assert_eq!(decompiled.loop_start, Some(48));
         assert_eq!(decompiled.timing.master_clock_hz, 1_789_773);
-        assert_eq!(decompiled.timing.frame_rate.hz_value(), 50);
+        assert_eq!(decompiled.timing.frame_rate, 50);
 
         for (idx, (orig, dec)) in song.frames.iter().zip(decompiled.frames.iter()).enumerate() {
             assert_eq!(orig.tone_a, dec.tone_a, "Tone A mismatch at frame {idx}");
@@ -1617,82 +1613,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cpc_dream_ysg_compression_round_trip() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-        let ym_path = std::path::Path::new(&manifest_dir).join("../test.ym");
-        if !ym_path.exists() {
-            return;
-        }
-
-        let bytes = std::fs::read(&ym_path).expect("Failed to read test.ym");
-        let ym_file = crate::ym_file::YmFile::from_bytes("cpc_dream", &bytes, None)
-            .expect("Failed to parse test.ym");
-        let song = ym_file
-            .to_sequence(None)
-            .expect("Failed to convert to sequence");
-
-        assert_eq!(song.frames.len(), 6144);
-
-        println!("\n=== YSG Pattern Size Exploration (CPC-Dream) ===");
-        println!("Frames | Steps | Uniq A/B/C/Glob | Track Bytes (A/B/C/Glob) | Total Bytes | Reduction vs Raw");
-        println!("-----------------------------------------------------------------------------------------");
-
-        let mut best_size = usize::MAX;
-        let mut best_frames = 0;
-
-        for &pf in &[8u8, 12, 16, 24, 32, 48, 64, 96, 128] {
-            if let Ok(det) = compile_ysg(&song, pf) {
-                let sz = det.bytes.len();
-                let pct = (1.0 - (sz as f64 / 98424.0)) * 100.0;
-                println!(
-                    "{:6} | {:5} | {:2}/{:2}/{:2}/{:2}     | {:4}/{:4}/{:4}/{:4}     | {:11} | {:5.1}%",
-                    pf, det.seq_len,
-                    det.unique_patterns_a, det.unique_patterns_b, det.unique_patterns_c, det.unique_patterns_global,
-                    det.track_a_bytes, det.track_b_bytes, det.track_c_bytes, det.track_global_bytes,
-                    sz,
-                    pct
-                );
-                if sz < best_size {
-                    best_size = sz;
-                    best_frames = pf;
-                }
-            }
-        }
-        println!("Best pattern_frames = {best_frames} with {best_size} bytes");
-
-        let (ta, _tb, _tc, _tg) = decompose_frames(&song.frames);
-        let pat0_a = encode_voice_pattern(&ta[0..48]);
-        println!(
-            "Track A Pattern 0 encoded bytes (len={}): {:?}",
-            pat0_a.len(),
-            pat0_a
-        );
-        let pat1_a = encode_voice_pattern(&ta[48..96]);
-        println!(
-            "Track A Pattern 1 encoded bytes (len={}): {:?}",
-            pat1_a.len(),
-            pat1_a
-        );
-        let pat2_a = encode_voice_pattern(&ta[96..144]);
-        println!(
-            "Track A Pattern 2 encoded bytes (len={}): {:?}",
-            pat2_a.len(),
-            pat2_a
-        );
-
-        let best_details = compile_ysg(&song, best_frames).expect("Compile best should succeed");
-        // Verify round-trip decompression
-        let decompiled =
-            decompile_ysg("cpc_dream", &best_details.bytes).expect("Decompile should succeed");
-        assert_eq!(decompiled.frames.len(), 6144);
-
-        println!("Frame 4560 orig: {:?}", song.frames[4560]);
-        println!("Frame 4560 dec : {:?}", decompiled.frames[4560]);
-
-        assert_round_trip_frames_match(&song.frames, &decompiled.frames);
-    }
-
-    #[test]
     fn test_scout_ysg_round_trip() {
         let ym_path = std::path::Path::new("../tests/fixtures/song/Scout.ym");
         if !ym_path.exists() {
@@ -1700,7 +1620,7 @@ mod tests {
         }
         let bytes = std::fs::read(ym_path).unwrap();
         let ym_file = crate::ym_file::YmFile::from_bytes("scout", &bytes, None).unwrap();
-        let song = ym_file.to_sequence(None).unwrap();
+        let song = ym_file.to_sequence(None);
 
         let compiled = compile_ysg_optimal(&song).expect("Compile scout should succeed");
         println!(
@@ -1722,8 +1642,8 @@ mod tests {
         let sample_count = 44100 * 5;
         let mut buf_orig = vec![0.0f32; sample_count];
         let mut buf_dec = vec![0.0f32; sample_count];
-        r_orig.render_samples(&mut buf_orig, 1);
-        r_dec.render_samples(&mut buf_dec, 1);
+        r_orig.render_samples(&mut buf_orig);
+        r_dec.render_samples(&mut buf_dec);
 
         let mut diff_count = 0;
         for (i, (s1, s2)) in buf_orig.iter().zip(buf_dec.iter()).enumerate() {
@@ -1781,11 +1701,7 @@ mod tests {
         }
         let song = YmSequence {
             name: "env_reuse".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: 1_789_773,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
+            timing: TimingConfig::new(1_789_773, 50),
             loop_start: None,
             frames,
         };
@@ -1838,11 +1754,7 @@ mod tests {
             .collect();
         let song = YmSequence {
             name: "huge".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: 1_789_773,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
+            timing: TimingConfig::new(1_789_773, 50),
             loop_start: None,
             frames,
         };

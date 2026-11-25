@@ -1,32 +1,27 @@
 pub mod ayfx;
-pub mod container;
 pub mod error;
 pub mod player;
 pub mod sequence;
 pub mod timing;
-pub mod traits;
 pub mod vgm_file;
 pub mod yfx;
 pub mod ym_file;
 pub mod ysg;
 
 pub use ayfx::AyfxFile;
-pub use container::{SfxContainer, SongContainer};
 pub use error::{Result, YmError};
 pub use player::{YmDataRenderer, YmMixer, YmSfxRenderer, YmSongRenderer};
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
 pub use timing::{
-    calculate_delay, HzOption, SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK,
-    ZX_SPECTRUM_CLOCK,
+    APPLE2_CLOCK, ATARI_7800_CLOCK, ATARI_ST_CLOCK, TimingConfig, ZX_SPECTRUM_CLOCK,
 };
-pub use traits::{SfxFile, SfxInput, SongFile, SongInput};
 pub use vgm_file::VgmFile;
 pub use yfx::YfxFile;
 pub use ym_file::YmFile;
 pub use ysg::{
-    compile_ysg, compile_ysg_optimal, decompile_ysg, GlobalFrame, TrackDescriptor, VoiceFrame,
-    YsgFile, YsgHeader, YsgSongDetails, CANDIDATE_PATTERN_FRAMES, SENTINEL_EMPTY_PATTERN,
-    YSG_HEADER_SIZE, YSG_MAGIC, YSG_MAX_FILE_SIZE, YSG_VERSION,
+    CANDIDATE_PATTERN_FRAMES, GlobalFrame, SENTINEL_EMPTY_PATTERN, TrackDescriptor, VoiceFrame,
+    YSG_HEADER_SIZE, YSG_MAGIC, YSG_MAX_FILE_SIZE, YSG_VERSION, YsgFile, YsgHeader, YsgSongDetails,
+    compile_ysg, compile_ysg_optimal, decompile_ysg,
 };
 
 #[cfg(test)]
@@ -35,38 +30,29 @@ mod tests {
 
     #[test]
     fn test_timing_defaults() {
-        let hz = SystemHz::Hz50;
-        assert_eq!(hz.hz_value(), 50);
-        assert!((hz.frame_duration_ms() - 20.0).abs() < f64::EPSILON);
+        let st = TimingConfig::ATARI_ST;
+        assert_eq!(st.frame_rate, 50);
+        assert!((st.frame_duration_ms() - 20.0).abs() < f64::EPSILON);
 
-        let hz60 = SystemHz::Hz60;
-        assert_eq!(hz60.hz_value(), 60);
+        let a7800 = TimingConfig::ATARI_7800;
+        assert_eq!(a7800.frame_rate, 60);
+        assert_eq!(a7800.master_clock_hz, ATARI_7800_CLOCK);
     }
 
     #[test]
     fn test_calculate_delay() {
         // Hand-computed against the same formula as a port-fidelity check:
         // remaining = 1_789_773/hz - 1800, y = floor(remaining/1285), x = round((remaining - y*1285)/5)
-        assert_eq!(calculate_delay(50), (26, 117));
-        assert_eq!(calculate_delay(60), (21, 209));
+        assert_eq!(TimingConfig::calculate_delay_for_hz(50), (26, 117));
+        assert_eq!(TimingConfig::calculate_delay_for_hz(60), (21, 209));
     }
 
     #[test]
     fn test_yfx_compilation_basic() {
-        let mut seq = SfxSequence {
-            name: "test_sfx".to_string(),
-            source_clock: ATARI_ST_CLOCK,
-            source_hz: 50,
-            priority: 0,
-            preferred_channels: None,
-            loop_start: None,
-            frames: Vec::new(),
-        };
-        seq.frames.push(SfxFrame {
-            tone: Some(450),
-            volume: Some(15),
-            ..Default::default()
-        });
+        let seq = SfxSequence::new(
+            "test_sfx",
+            vec![SfxFrame::new(true, false, 450, 0, 15, 1)],
+        );
 
         let payload = YfxFile::from_sequence(&seq).to_bytes();
         assert_eq!(payload.len(), 5);
@@ -74,21 +60,32 @@ mod tests {
     }
 
     #[test]
-    fn test_ayfx_csv_parsing() {
-        let csv_data = "0,1,0x8a8,0x1f,0xf\n0,1,0x8a8,0x1c,0xe";
-        let seq = SfxSequence::from_ayfx_csv("laser", csv_data).unwrap();
+    fn test_ayfx_csv_parsing_and_optional_duration() {
+        let csv_data = "# comment\n0,1,0x8a8,0x1f,0xf\n1,0,0x1c2,0x00,0xe,4";
+        let ayfx = AyfxFile::from_csv("laser", csv_data).unwrap();
+        assert_eq!(ayfx.sequences.len(), 1);
+        let seq = &ayfx.sequences[0];
 
         assert_eq!(seq.name, "laser");
-        assert_eq!(seq.source_clock, ZX_SPECTRUM_CLOCK);
-        assert_eq!(seq.source_hz, 50);
         assert_eq!(seq.frames.len(), 2);
 
-        let frame = &seq.frames[0];
-        assert_eq!(frame.tone_enable, Some(false));
-        assert_eq!(frame.noise_enable, Some(true));
-        assert_eq!(frame.tone, Some(2216)); // 0x8a8 = 2216
-        assert_eq!(frame.noise, Some(31)); // 0x1f = 31
-        assert_eq!(frame.volume, Some(15)); // 0xf = 15
+        let frame0 = seq.frames[0];
+        assert!(!frame0.tone_enable);
+        assert!(frame0.noise_enable);
+        assert_eq!(frame0.tone, 2216); // 0x8a8 = 2216
+        assert_eq!(frame0.noise, 31); // 0x1f = 31
+        assert_eq!(frame0.volume, 15); // 0xf = 15
+        assert_eq!(frame0.duration, 1);
+
+        let frame1 = seq.frames[1];
+        assert!(frame1.tone_enable);
+        assert!(!frame1.noise_enable);
+        assert_eq!(frame1.tone, 450); // 0x1c2 = 450
+        assert_eq!(frame1.volume, 14);
+        assert_eq!(frame1.duration, 4);
+
+        // Zero duration is rejected
+        assert!(AyfxFile::from_csv("bad", "1,0,0x100,0,15,0").is_err());
     }
 
     #[test]
@@ -101,60 +98,39 @@ mod tests {
             187, 0, 164, 193, 0, 163, 199, 0, 162, 205, 0, 161, 211, 0, 208, 32, 119, 105, 122, 98,
             97, 108, 108, 95, 49, 0,
         ];
-        let bank = SfxSequence::from_ayfx_bank(&bank_bytes).unwrap();
+        let bank = AyfxFile::from_bank(&bank_bytes).unwrap().to_sequences();
         assert_eq!(bank.len(), 1);
         let seq = &bank[0];
         assert_eq!(seq.name, "wizball_1");
         assert_eq!(seq.frames.len(), 31);
-        assert_eq!(seq.frames[0].volume, Some(13));
-        assert_eq!(seq.frames[0].tone_enable, Some(true));
-        assert_eq!(seq.frames[0].noise_enable, Some(false));
-        assert_eq!(seq.frames[0].tone, Some(31));
-        assert_eq!(seq.frames[0].noise, Some(0));
+        assert_eq!(seq.frames[0].volume, 13);
+        assert!(seq.frames[0].tone_enable);
+        assert!(!seq.frames[0].noise_enable);
+        assert_eq!(seq.frames[0].tone, 31);
+        assert_eq!(seq.frames[0].noise, 0);
     }
 
     #[test]
-    fn test_from_yfx() {
-        let source_seq = SfxSequence {
-            name: "test_sfx".to_string(),
-            source_clock: ATARI_ST_CLOCK,
-            source_hz: 50,
-            priority: 1,
-            preferred_channels: None,
-            loop_start: None,
-            frames: vec![
-                SfxFrame {
-                    tone_enable: Some(true),
-                    noise_enable: Some(false),
-                    tone: Some(100),
-                    noise: Some(0),
-                    volume: Some(15),
-                    duration: Some(1),
-                },
-                SfxFrame {
-                    tone_enable: Some(true),
-                    noise_enable: Some(false),
-                    tone: Some(102),
-                    noise: Some(0),
-                    volume: Some(14),
-                    duration: Some(1),
-                },
+    fn test_yfx_round_trip() {
+        let source_seq = SfxSequence::new(
+            "test_sfx",
+            vec![
+                SfxFrame::new(true, false, 100, 0, 15, 1),
+                SfxFrame::new(true, false, 102, 0, 14, 2),
             ],
-        };
+        );
 
-        let payload = YfxFile::from_sequence(&source_seq).to_bytes();
+        let yfx = YfxFile::from_sequence(&source_seq);
+        assert_eq!(yfx.frame_count(), 2);
+        let payload = yfx.to_bytes();
+        assert_eq!(payload.len(), 10);
 
-        let decoded = SfxSequence::from_yfx("test_sfx", &payload).unwrap();
-        assert_eq!(decoded.frames.len(), 2);
-        assert_eq!(decoded.frames[0].tone, Some(100));
-        assert_eq!(decoded.frames[0].volume, Some(15));
-        assert_eq!(decoded.frames[1].tone, Some(102));
-        assert_eq!(decoded.frames[1].volume, Some(14));
+        let decoded = YfxFile::from_bytes(&payload).unwrap().to_sequence("test_sfx");
+        assert_eq!(decoded, source_seq);
     }
 
     #[test]
     fn test_ayfx_effect_parsing() {
-        // Just the effect data slice from pew.afb (after byte 3, length 106 minus name)
         let effect_bytes = vec![
             237, 31, 0, 0, 173, 37, 0, 172, 43, 0, 172, 49, 0, 172, 55, 0, 172, 61, 0, 172, 67, 0,
             172, 73, 0, 172, 79, 0, 172, 85, 0, 172, 91, 0, 172, 97, 0, 172, 103, 0, 172, 109, 0,
@@ -162,20 +138,20 @@ mod tests {
             0, 170, 157, 0, 169, 163, 0, 168, 169, 0, 167, 175, 0, 166, 181, 0, 165, 187, 0, 164,
             193, 0, 163, 199, 0, 162, 205, 0, 161, 211, 0, 208, 32,
         ];
-        let seq = SfxSequence::from_ayfx_effect("pew", &effect_bytes).unwrap();
+        let ayfx = AyfxFile::from_effect("pew", &effect_bytes).unwrap();
+        let seq = &ayfx.sequences[0];
         assert_eq!(seq.name, "pew");
         assert_eq!(seq.frames.len(), 31);
-        assert_eq!(seq.frames[0].volume, Some(13));
-        assert_eq!(seq.frames[0].tone_enable, Some(true));
-        assert_eq!(seq.frames[0].noise_enable, Some(false));
-        assert_eq!(seq.frames[0].tone, Some(31));
-        assert_eq!(seq.frames[0].noise, Some(0));
+        assert_eq!(seq.frames[0].volume, 13);
+        assert!(seq.frames[0].tone_enable);
+        assert!(!seq.frames[0].noise_enable);
+        assert_eq!(seq.frames[0].tone, 31);
+        assert_eq!(seq.frames[0].noise, 0);
     }
 
     #[test]
     fn test_song_compilation_and_parsing() {
         let mut frames = Vec::new();
-        // Create 70 frames to span beyond a 48-frame pattern block
         for i in 0u16..70u16 {
             frames.push(YmFrame {
                 tone_a: Some(200 + i),
@@ -186,40 +162,34 @@ mod tests {
         }
         let song = YmSequence {
             name: "test_song".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: 1_789_773,
-                frame_rate: SystemHz::Custom(17),
-            },
-            priority: 0,
+            timing: TimingConfig::new(ATARI_7800_CLOCK, 17),
             loop_start: None,
             frames,
         };
 
         let details = compile_ysg(&song, 48).unwrap();
         let ysg_bytes = details.bytes;
-
         assert_eq!(&ysg_bytes[0..2], b"YS");
 
-        let decoded = YmSequence::from_ysg("test_song", &ysg_bytes).unwrap();
+        let decoded = YsgFile::decompile("test_song", &ysg_bytes).unwrap();
         assert_eq!(decoded.frames[0].tone_a, Some(200));
         assert_eq!(decoded.frames[0].volume_a, Some(15));
         assert_eq!(decoded.frames[69].tone_a, Some(269));
-        assert_eq!(decoded.timing.master_clock_hz, 1_789_773);
-        assert_eq!(decoded.timing.frame_rate.hz_value(), 17);
+        assert_eq!(decoded.timing.master_clock_hz, ATARI_7800_CLOCK);
+        assert_eq!(decoded.timing.frame_rate, 17);
     }
 
     #[test]
     fn test_zero_hz_safety() {
-        let (y, _x) = calculate_delay(0);
+        let (y, _x) = TimingConfig::calculate_delay_for_hz(0);
         assert!(y > 0);
 
-        let hz_custom = SystemHz::Custom(0);
-        assert!(hz_custom.frame_duration_ms().is_finite());
+        let zero_timing = TimingConfig::new(ATARI_7800_CLOCK, 0);
+        assert!(zero_timing.frame_duration_ms().is_finite());
     }
 
     #[test]
     fn test_idle_frames_compression() {
-        // Build a song with a long silent section — channel-split wait tokens compress it.
         let mut frames = Vec::new();
         frames.push(YmFrame {
             tone_a: Some(440),
@@ -228,38 +198,32 @@ mod tests {
             ..Default::default()
         });
         for _ in 0..50 {
-            frames.push(YmFrame::default()); // 50 idle frames
+            frames.push(YmFrame::default());
         }
         let song = YmSequence {
             name: "idle_test".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: ATARI_7800_CLOCK,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
+            timing: TimingConfig::new(ATARI_7800_CLOCK, 50),
             loop_start: None,
             frames,
         };
         let details = compile_ysg(&song, 64).unwrap();
         assert!(details.track_a_bytes < 20);
 
-        // Round-trip: decoded frame count must match
-        let decoded = YmSequence::from_ysg("idle_test", &details.bytes).unwrap();
+        let decoded = YsgFile::decompile("idle_test", &details.bytes).unwrap();
         assert_eq!(decoded.frames.len(), 64);
     }
 
     #[test]
     fn test_truncated_ysg_returns_err() {
-        let truncated_bytes = vec![b'Y', b'S', 1, 0]; // 4 bytes instead of 20
-        assert!(YmSequence::from_ysg("bad", &truncated_bytes).is_err());
+        let truncated_bytes = vec![b'Y', b'S', 1, 0];
+        assert!(YsgFile::decompile("bad", &truncated_bytes).is_err());
     }
 
     #[test]
-    fn test_song_renderer() {
+    fn test_song_renderer_mono() {
         let song = YmSequence {
             name: "test".to_string(),
             timing: TimingConfig::default(),
-            priority: 0,
             loop_start: None,
             frames: vec![YmFrame {
                 tone_a: Some(440),
@@ -273,19 +237,18 @@ mod tests {
         assert!(!renderer.is_finished());
 
         let mut buf = vec![0.0f32; 1024];
-        renderer.render_samples(&mut buf, 2);
+        renderer.render_samples(&mut buf);
         assert!(buf.iter().any(|&s| s != 0.0));
+        assert!(renderer.is_finished());
+        // Tail samples past the 1-frame mark (~735 samples) are zeroed.
+        assert!(buf[800..].iter().all(|&s| s == 0.0));
     }
 
     #[test]
-    fn test_song_file_trait_round_trip() {
+    fn test_ysg_file_round_trip() {
         let song = YmSequence {
-            name: "trait_test".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: ATARI_7800_CLOCK,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
+            name: "ysg_test".to_string(),
+            timing: TimingConfig::new(ATARI_7800_CLOCK, 50),
             loop_start: Some(0),
             frames: vec![
                 YmFrame {
@@ -298,22 +261,18 @@ mod tests {
             ],
         };
 
-        // Compile through YsgFile constructor
         let (ysg_file, details) = YsgFile::from_sequence(&song, 16).unwrap();
         assert_eq!(ysg_file.header.seq_len, 2);
         assert_eq!(ysg_file.header.pattern_frames, 16);
 
-        // Serialize via SongFile trait
         let binary = ysg_file.to_bytes();
         assert_eq!(binary.len(), details.bytes.len());
         assert_eq!(ysg_file.frame_rate_hz(), 50);
         assert_eq!(ysg_file.master_clock_hz(), ATARI_7800_CLOCK);
 
-        // Parse via YsgFile::from_bytes
         let parsed = YsgFile::from_bytes(&binary).unwrap();
         assert_eq!(parsed.header.seq_len, 2);
 
-        // Decompile via SongFile trait
         let restored = parsed.to_sequence("restored").unwrap();
         assert_eq!(restored.frames.len(), 32);
         assert_eq!(restored.frames[0].tone_a, Some(300));
@@ -321,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ym_file_trait_input() {
+    fn test_ym_file_input() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         let ym_path =
             std::path::Path::new(&manifest_dir).join("../tests/fixtures/song/ND-Loader.ym");
@@ -332,96 +291,24 @@ mod tests {
         let bytes = std::fs::read(&ym_path).unwrap();
         let ym_file = YmFile::from_bytes("ND-Loader", &bytes, None).unwrap();
 
-        // Exercise SongInput trait
         assert_eq!(ym_file.title(), "ND-Loader");
         assert_eq!(ym_file.source_hz(), 50);
         assert!(ym_file.source_clock() > 0);
-        assert!(!ym_file.raw_frames.is_empty());
+        assert_ne!(ym_file.raw_frames.len(), 0);
 
-        let seq = ym_file.to_sequence(Some(ATARI_7800_CLOCK)).unwrap();
+        let seq = ym_file.to_sequence(Some(ATARI_7800_CLOCK));
         assert_eq!(seq.frames.len(), ym_file.raw_frames.len());
         assert_eq!(seq.timing.master_clock_hz, ATARI_7800_CLOCK);
     }
 
     #[test]
-    fn test_yfx_file_trait_round_trip() {
-        let source_seq = SfxSequence {
-            name: "test_sfx".to_string(),
-            source_clock: ZX_SPECTRUM_CLOCK,
-            source_hz: 50,
-            priority: 1,
-            preferred_channels: None,
-            loop_start: None,
-            frames: vec![
-                SfxFrame {
-                    tone_enable: Some(true),
-                    noise_enable: Some(false),
-                    tone: Some(250),
-                    noise: Some(0),
-                    volume: Some(15),
-                    duration: Some(1),
-                },
-                SfxFrame {
-                    tone_enable: Some(true),
-                    noise_enable: Some(false),
-                    tone: Some(260),
-                    noise: Some(0),
-                    volume: Some(12),
-                    duration: Some(2),
-                },
-            ],
-        };
-
-        // Exercise SfxFile and SfxInput on YfxFile
-        let yfx = YfxFile::from_sequence(&source_seq);
-        let raw_bytes = yfx.to_bytes();
-        assert_eq!(raw_bytes.len(), 10);
-        assert_eq!(yfx.frame_count(), 2);
-
-        let parsed_yfx = YfxFile::from_bytes(&raw_bytes).unwrap();
-        let decoded_seq = parsed_yfx.to_sequence("test_sfx").unwrap();
-        assert_eq!(decoded_seq.frames.len(), 2);
-        assert_eq!(decoded_seq.frames[0].tone, Some(250));
-        assert_eq!(decoded_seq.frames[0].volume, Some(15));
-        assert_eq!(decoded_seq.frames[1].tone, Some(260));
-        assert_eq!(decoded_seq.frames[1].volume, Some(12));
-        assert_eq!(decoded_seq.frames[1].duration, Some(2));
-
-        // SfxInput trait test
-        let seqs = parsed_yfx.to_sequences().unwrap();
-        assert_eq!(seqs.len(), 1);
-        assert_eq!(seqs[0].frames.len(), 2);
-    }
-
-    #[test]
-    fn test_ayfx_file_trait_input() {
-        let csv_data = "0,1,0x8a8,0x1f,0xf\n0,1,0x8a8,0x1c,0xe";
-        let ayfx = AyfxFile::from_csv("laser", csv_data).unwrap();
-
-        // Exercise SfxInput trait
-        let seqs = ayfx.to_sequences().unwrap();
-        assert_eq!(seqs.len(), 1);
-        assert_eq!(seqs[0].name, "laser");
-        assert_eq!(seqs[0].frames.len(), 2);
-        assert_eq!(seqs[0].frames[0].tone, Some(2216));
-    }
-
-    #[test]
-    fn test_try_from_traits() {
-        use std::convert::TryFrom;
-
-        // Valid YfxFile TryFrom
+    fn test_try_from_conversions() {
         let raw_yfx = vec![0x12, 0x34, 0x0F, 0x01, 0x01];
         let yfx = YfxFile::try_from(raw_yfx.as_slice()).unwrap();
         assert_eq!(yfx.bytes.len(), 5);
 
-        // Invalid YfxFile length
         assert!(YfxFile::try_from([0u8; 4].as_slice()).is_err());
-
-        // Invalid YsgHeader length
         assert!(YsgHeader::try_from([0u8; 10].as_slice()).is_err());
-
-        // Invalid YsgFile length
         assert!(YsgFile::try_from([0u8; 10].as_slice()).is_err());
     }
 
@@ -459,106 +346,73 @@ mod tests {
     }
 
     #[test]
-    fn test_containers() {
-        // SfxContainer CSV
+    fn test_sequence_from_bytes_dispatch() {
+        // SFX CSV
         let csv_data = b"0,1,0x8a8,0x1f,0xf\n0,1,0x8a8,0x1c,0xe";
-        let container = SfxContainer::from_bytes("laser", "csv", csv_data).unwrap();
-        let seqs = container.to_sequences().unwrap();
+        let seqs = SfxSequence::from_bytes("laser", "csv", csv_data).unwrap();
         assert_eq!(seqs.len(), 1);
         assert_eq!(seqs[0].name, "laser");
 
-        // SfxContainer YFX
+        // SFX YFX
         let raw_yfx = vec![0x12, 0x34, 0x0F, 0x01, 0x01];
-        let container_yfx = SfxContainer::from_bytes("test_sfx", "yfx", &raw_yfx).unwrap();
-        let seqs_yfx = container_yfx.to_sequences().unwrap();
+        let seqs_yfx = SfxSequence::from_bytes("test_sfx", "yfx", &raw_yfx).unwrap();
         assert_eq!(seqs_yfx.len(), 1);
 
-        // SfxContainer Unsupported
-        assert!(SfxContainer::from_bytes("unknown", "wav", b"riff").is_err());
+        // Unsupported SFX extensions (including dropped JSON)
+        assert!(SfxSequence::from_bytes("unknown", "wav", b"riff").is_err());
+        assert!(SfxSequence::from_bytes("legacy", "json", b"{}").is_err());
 
-        // SongContainer JSON
-        let song = YmSequence {
-            name: "test_json".to_string(),
-            timing: TimingConfig::default(),
-            priority: 0,
-            loop_start: None,
-            frames: vec![YmFrame::default()],
-        };
-        let song_json = serde_json::to_vec(&song).unwrap();
-        let container_song =
-            SongContainer::from_bytes("test_json", "json", &song_json, None).unwrap();
-        assert_eq!(container_song.title(), "test_json");
-        let decoded = container_song.to_sequence("test_json", None).unwrap();
-        assert_eq!(decoded.frames.len(), 1);
-
-        // SongContainer JSON with pitch scaling
+        // Song YSG with pitch retuning
         let song_st = YmSequence {
             name: "test_st".to_string(),
-            timing: TimingConfig {
-                master_clock_hz: ATARI_ST_CLOCK,
-                frame_rate: SystemHz::Hz50,
-            },
-            priority: 0,
+            timing: TimingConfig::ATARI_ST,
             loop_start: None,
             frames: vec![YmFrame {
                 tone_a: Some(2000),
                 volume_a: Some(15),
+                tone_enable_a: Some(true),
                 ..Default::default()
             }],
         };
-        let st_json = serde_json::to_vec(&song_st).unwrap();
-        let container_st = SongContainer::from_bytes("test_st", "json", &st_json, None).unwrap();
-        let retuned = container_st
-            .to_sequence("test_st", Some(1_000_000))
-            .unwrap();
+        let ysg_bytes = compile_ysg(&song_st, 16).unwrap().bytes;
+        let retuned =
+            YmSequence::from_bytes("test_st", "ysg", &ysg_bytes, None, Some(1_000_000)).unwrap();
         assert_eq!(retuned.frames[0].tone_a, Some(1000));
         assert_eq!(retuned.timing.master_clock_hz, 1_000_000);
+
+        // Unsupported song extension
+        assert!(YmSequence::from_bytes("legacy", "json", b"{}", None, None).is_err());
     }
 
     #[test]
     fn test_sfx_duration_in_renderer() {
-        let seq = SfxSequence {
-            name: "dur".to_string(),
-            source_clock: ATARI_ST_CLOCK,
-            source_hz: 50,
-            priority: 0,
-            preferred_channels: None,
-            loop_start: None,
-            frames: vec![
-                SfxFrame {
-                    duration: Some(3),
-                    volume: Some(15),
-                    ..Default::default()
-                },
-                SfxFrame {
-                    duration: Some(1),
-                    volume: Some(10),
-                    ..Default::default()
-                },
+        let seq = SfxSequence::new(
+            "dur",
+            vec![
+                SfxFrame::new(true, false, 440, 0, 15, 3),
+                SfxFrame::new(true, false, 440, 0, 10, 1),
             ],
-        };
+        );
 
-        let mut renderer = YmSfxRenderer::new(&seq, 50); // 1 sample per frame
+        let mut renderer = YmSfxRenderer::new(&seq, YmChannel::A, TimingConfig::ATARI_ST, 50);
         let mut sample = [0.0f32; 1];
 
         // Frame 0: duration = 3 ticks.
-        // Tick 1
-        renderer.render_samples(&mut sample, 1);
+        renderer.render_samples(&mut sample);
         assert_eq!(renderer.current_frame(), 0);
         assert!(!renderer.is_finished());
 
-        // Tick 2
-        renderer.render_samples(&mut sample, 1);
+        renderer.render_samples(&mut sample);
         assert_eq!(renderer.current_frame(), 0);
         assert!(!renderer.is_finished());
 
         // Tick 3: finishes frame 0 and advances to frame 1
-        renderer.render_samples(&mut sample, 1);
+        renderer.render_samples(&mut sample);
         assert_eq!(renderer.current_frame(), 1);
         assert!(!renderer.is_finished());
 
         // Tick 4: renders frame 1 and finishes sequence
-        renderer.render_samples(&mut sample, 1);
+        renderer.render_samples(&mut sample);
         assert!(renderer.is_finished());
     }
 
@@ -575,7 +429,6 @@ mod tests {
         frame1.apply_to_chip(&mut chip, &mut mixer, &mut last_shape);
         assert_eq!(last_shape, Some(0x0E));
 
-        // Apply identical shape: must write again and keep Some(0x0E)
         let frame2 = YmFrame {
             envelope_shape: Some(0x0E),
             ..Default::default()
@@ -586,11 +439,9 @@ mod tests {
 
     #[test]
     fn test_malformed_bank_rejected() {
-        // Truncated bank header
         let empty: &[u8] = &[];
         assert!(AyfxFile::from_bank(empty).is_err());
 
-        // 2 effects declared, but only 1 pointer entry present
         let truncated = vec![2, 1];
         assert!(AyfxFile::from_bank(&truncated).is_err());
     }

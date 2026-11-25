@@ -72,7 +72,7 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgz | $(BUILD_DIR)
 
 # --- Assemble player once ---
 
-$(BUILD_DIR)/player.o: ysg_player.s ysg.inc ../include/maria.inc ../include/ym2149.inc | $(BUILD_DIR)
+$(BUILD_DIR)/player.o: ysg_player.s ../include/ysg.inc ../include/maria.inc ../include/ym2149.inc | $(BUILD_DIR)
 	@echo "  Assembling player"
 	@$(CA65) $(CA65_FLAGS) $< -o $@
 

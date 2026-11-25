@@ -1,15 +1,14 @@
-pub mod audio;
+mod audio;
 
-use audio::{AudioConfig, AudioPlayer};
+use audio::AudioConfig;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use ym_core::traits::{SfxFile, SongFile};
 use ym_core::{
-    HzOption, SfxSequence, SongContainer, SystemHz, YfxFile, YmChannel, YmSequence, YsgFile,
+    SfxSequence, TimingConfig, VgmFile, YfxFile, YmChannel, YmError, YmFile, YmSequence, YsgFile,
     YsgSongDetails,
 };
 
@@ -39,11 +38,11 @@ enum MainCommands {
     },
     /// Real-time interactive music & sound effect keyboard mixer
     Mix {
-        /// Input background song file (.ysg, .ym, .vgm, .vgz, .json)
+        /// Input background song file (.ysg, .ym, .vgm, .vgz)
         #[arg(short, long)]
         song: PathBuf,
 
-        /// One or more input sound effect files or banks (.yfx, .json, .csv, .afx, .afb)
+        /// One or more input sound effect files or banks (.yfx, .csv, .afx, .afb)
         #[arg(short = 'e', long, num_args = 1..)]
         sfx: Vec<PathBuf>,
 
@@ -70,7 +69,7 @@ enum MainCommands {
 
 #[derive(Args, Debug)]
 struct SongRenderArgs {
-    /// Input song file (.ym, .vgm, .vgz, .ysg, .json)
+    /// Input song file (.ym, .vgm, .vgz, .ysg)
     #[arg(short, long)]
     input: PathBuf,
 
@@ -107,14 +106,14 @@ struct SongRenderArgs {
 
 #[derive(Subcommand, Debug)]
 enum SongCommands {
-    /// Render a music song file (.ym, .vgm, .vgz, .ysg, .json) into a compiled YM-2149 stream (.ysg)
+    /// Render a music song file (.ym, .vgm, .vgz, .ysg) into a compiled YM-2149 stream (.ysg)
     Render {
         #[command(flatten)]
         args: SongRenderArgs,
     },
     /// Dump raw frame register data for diagnostic inspection
     Dump {
-        /// Input song file (.ym, .vgm, .vgz, .ysg, .json)
+        /// Input song file (.ym, .vgm, .vgz, .ysg)
         #[arg(short, long)]
         input: PathBuf,
 
@@ -134,7 +133,7 @@ enum SongCommands {
     },
     /// Audition and play a music song file or stream
     Play {
-        /// Input song file (.ym, .vgm, .vgz, .ysg, .json). `--raw` applies to `.ym` only.
+        /// Input song file (.ym, .vgm, .vgz, .ysg). `--raw` applies to `.ym` only.
         #[arg(short, long)]
         input: PathBuf,
 
@@ -163,11 +162,11 @@ enum HzOptionArg {
     Hz60,
 }
 
-impl From<HzOptionArg> for HzOption {
-    fn from(opt: HzOptionArg) -> Self {
-        match opt {
-            HzOptionArg::Hz50 => HzOption::Hz50,
-            HzOptionArg::Hz60 => HzOption::Hz60,
+impl HzOptionArg {
+    const fn hz(self) -> u32 {
+        match self {
+            Self::Hz50 => 50,
+            Self::Hz60 => 60,
         }
     }
 }
@@ -176,22 +175,39 @@ impl From<HzOptionArg> for HzOption {
 
 #[derive(Args, Debug)]
 struct SfxCommonArgs {
+    /// Input sound effect file (.csv, .afx, .afb, .yfx)
     #[arg(short, long)]
     input: PathBuf,
 
+    /// Playback tick rate override in Hz (default: 50)
     #[arg(long, value_enum)]
     hz: Option<HzOptionArg>,
 
+    /// Target chip clock in Hz (default: 1773400 for AYFX/ZX Spectrum)
     #[arg(long)]
     clock: Option<u32>,
 
+    /// Zero-indexed sound effect selection for multi-effect .afb banks
     #[arg(long, default_value_t = 0)]
     index: usize,
 }
 
+impl SfxCommonArgs {
+    fn timing(&self) -> TimingConfig {
+        let mut timing = TimingConfig::ZX_SPECTRUM;
+        if let Some(c) = self.clock {
+            timing.master_clock_hz = c;
+        }
+        if let Some(h) = self.hz {
+            timing.frame_rate = h.hz();
+        }
+        timing
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum SfxCommands {
-    /// Render a sound effect source file into compiled YM-2149 binary payload (.yfx)
+    /// Render a sound effect source file (.csv, .afx, .afb, .yfx) into compiled YM-2149 binary payload (.yfx)
     Render {
         #[command(flatten)]
         common: SfxCommonArgs,
@@ -203,6 +219,10 @@ enum SfxCommands {
     Play {
         #[command(flatten)]
         common: SfxCommonArgs,
+
+        /// YM channel on which to play the sound effect (A, B, or C)
+        #[arg(short, long, value_enum, default_value = "a")]
+        channel: ChannelArg,
     },
 }
 
@@ -260,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         MainCommands::Sfx { command } => match command {
             SfxCommands::Render { common, output } => run_sfx_render(&common, output),
-            SfxCommands::Play { common } => run_sfx_play(&common),
+            SfxCommands::Play { common, channel } => run_sfx_play(&common, channel),
         },
         MainCommands::Mix {
             song,
@@ -281,7 +301,7 @@ fn run_song_dump(
     target_clock: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sequence = with_spinner("Decoding...", || {
-        YmSequence::load_from_path(input, clock, target_clock)
+        YmSequence::from_file(input, clock, target_clock)
     })?;
 
     let end = (start + frames).min(sequence.frames.len());
@@ -338,7 +358,7 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
     });
     let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
-    let (mut sequence, digidrum_frames, original_ym_size) =
+    let (mut sequence, digidrum_frames, original_size) =
         decode_song_input(input, extension, name, clock, target_clock)?;
     let step = step.max(1);
     println!(
@@ -347,7 +367,7 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
         style(input.display()).cyan()
     );
     sequence.decimate(step);
-    apply_frame_rate(&mut sequence, hz.map(Into::into), step);
+    apply_frame_rate(&mut sequence, hz, step);
 
     let original_frames = sequence.frames.len();
     let compile = |seq: &YmSequence| match pattern_frames {
@@ -356,8 +376,6 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
     };
     let (ysg_file, compiled) = with_spinner("Compiling YSG song...", || {
         match (compile(&sequence), max_bytes) {
-            // Too large for the format itself: with --max-bytes, cut the song down to
-            // the longest prefix that compiles, then let shrink_to_max_bytes trim further.
             (Err(_), Some(_)) => compile_longest_prefix(&mut sequence, compile),
             (result, _) => Ok(result?),
         }
@@ -371,7 +389,7 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
     fs::write(&output_path, ysg_file.to_bytes())?;
     write_ysi_include(input, name, &output_path, &sequence, &compiled)?;
 
-    let final_hz = sequence.timing.frame_rate.hz_value();
+    let final_hz = sequence.timing.frame_rate;
     println!(
         "{} {} frames -> {} ({} bytes, pattern frames {}, seq len {}, {} Hz)",
         style("RENDER SUCCESS:").bold().green(),
@@ -402,13 +420,11 @@ fn run_song_render(args: SongRenderArgs) -> Result<(), Box<dyn std::error::Error
             style(pad_frames).yellow(),
         );
     }
-    if let Some(original_size) = original_ym_size {
-        let out_ext = output_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("ysg");
-        print_size_comparison(original_size, compiled.bytes.len(), out_ext);
-    }
+    let out_ext = output_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("ysg");
+    print_size_comparison(original_size, compiled.bytes.len(), out_ext);
     print_ysg_compression_report(&compiled);
     Ok(())
 }
@@ -489,8 +505,7 @@ fn write_ysi_include(
     sequence: &YmSequence,
     details: &YsgSongDetails,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let final_hz = sequence.timing.frame_rate.hz_value();
-    let (delay_y, delay_x) = sequence.timing.frame_rate.calculate_delay();
+    let (delay_y, delay_x) = sequence.timing.calculate_delay();
     let ysi_path = output_path.with_extension("ysi");
     let scope_name: String = name
         .chars()
@@ -517,7 +532,7 @@ fn write_ysi_include(
         input.display(),
         scope_name,
         sequence.frames.len(),
-        final_hz,
+        sequence.timing.frame_rate,
         sequence.timing.master_clock_hz,
         delay_y,
         delay_x,
@@ -526,7 +541,6 @@ fn write_ysi_include(
         details.bytes.len(),
     );
     fs::write(&ysi_path, &ysi_contents)?;
-
     Ok(())
 }
 
@@ -541,48 +555,65 @@ fn print_ysg_compression_report(details: &YsgSongDetails) {
     );
     println!(
         "Track Layout:      Track A: {} B ({} uniq) | Track B: {} B ({} uniq) | Track C: {} B ({} uniq) | Global: {} B ({} uniq)",
-        details.track_a_bytes, details.unique_patterns_a,
-        details.track_b_bytes, details.unique_patterns_b,
-        details.track_c_bytes, details.unique_patterns_c,
-        details.track_global_bytes, details.unique_patterns_global,
+        details.track_a_bytes,
+        details.unique_patterns_a,
+        details.track_b_bytes,
+        details.unique_patterns_b,
+        details.track_c_bytes,
+        details.unique_patterns_c,
+        details.track_global_bytes,
+        details.unique_patterns_global,
     );
 }
 
-/// Decodes a song source (`.ym`, `.vgm`, `.vgz`, `.ysg`, or `.json`) into a `YmSequence`.
-/// Returns the sequence, the number of YM6 digi-drum frames silenced, and (for `.ym`,
-/// `.vgm`, and `.vgz` input) the original decompressed byte size for later size comparison.
+/// Decodes a song source (`.ym`, `.vgm`, `.vgz`, or `.ysg`) into a `YmSequence`.
+/// Returns the sequence, the number of YM6 digi-drum frames silenced, and the
+/// original decompressed byte size for size comparison reporting.
 fn decode_song_input(
     input: &Path,
     extension: &str,
     name: &str,
     clock: Option<u32>,
     target_clock: Option<u32>,
-) -> Result<(YmSequence, usize, Option<usize>), Box<dyn std::error::Error>> {
+) -> Result<(YmSequence, usize, usize), Box<dyn std::error::Error>> {
     let bytes = fs::read(input)?;
-    let container = with_spinner("Decoding song...", || {
-        SongContainer::from_bytes(name, extension, &bytes, clock)
+    let decoded = with_spinner("Decoding song...", || {
+        match extension.to_ascii_lowercase().as_str() {
+            "ym" => {
+                let ym = YmFile::from_bytes(name, &bytes, clock)?;
+                Ok((
+                    ym.to_sequence(target_clock),
+                    ym.digidrum_frames,
+                    ym.uncompressed_len,
+                ))
+            }
+            "vgm" | "vgz" => {
+                let vgm = VgmFile::from_bytes(name, &bytes, clock)?;
+                Ok((vgm.to_sequence(target_clock), 0, vgm.uncompressed_len))
+            }
+            "ysg" => {
+                let mut seq = YsgFile::from_bytes(&bytes)?.to_sequence(name)?;
+                if let Some(tc) = target_clock {
+                    seq.retune_clock(tc);
+                }
+                Ok((seq, 0, bytes.len()))
+            }
+            _ => Err(YmError::UnsupportedExtension(extension.to_string())),
+        }
     })?;
-
-    let (digidrum_frames, original_ym_size) = match &container {
-        SongContainer::Ym(ym) => (ym.digidrum_frames, Some(ym.uncompressed_len)),
-        SongContainer::Vgm(vgm) => (0, Some(vgm.uncompressed_len)),
-        SongContainer::Ysg(_) => (0, Some(bytes.len())),
-        SongContainer::Json(_) => (0, None),
-    };
-
-    let sequence = container.to_sequence(name, target_clock)?;
-    Ok((sequence, digidrum_frames, original_ym_size))
+    Ok(decoded)
 }
 
 /// Applies an explicit `--hz` override, or (when frame-decimating via `--step`)
 /// rescales the frame rate down to match the reduced frame count.
-fn apply_frame_rate(sequence: &mut YmSequence, hz: Option<HzOption>, step: usize) {
+fn apply_frame_rate(sequence: &mut YmSequence, hz: Option<HzOptionArg>, step: usize) {
     if let Some(hz_override) = hz {
-        sequence.timing.frame_rate = hz_override.into();
+        sequence.timing.frame_rate = hz_override.hz();
     } else if step > 1 {
-        let current_hz = sequence.timing.frame_rate.hz_value();
-        let decimated_hz = (f64::from(current_hz) / step as f64).round().max(1.0) as u32;
-        sequence.timing.frame_rate = SystemHz::Custom(decimated_hz);
+        let decimated_hz = (f64::from(sequence.timing.frame_rate) / step as f64)
+            .round()
+            .max(1.0) as u32;
+        sequence.timing.frame_rate = decimated_hz;
     }
 }
 
@@ -622,7 +653,7 @@ fn run_song_play(
                 style(input.display()).cyan()
             );
             let ym_data = fs::read(input)?;
-            return AudioPlayer::play_ym_data(&ym_data, &AudioConfig::default());
+            return audio::play_ym_data(&ym_data, &AudioConfig::default());
         }
         eprintln!(
             "{} --raw is only supported for .ym files; falling back to frame playback",
@@ -630,20 +661,18 @@ fn run_song_play(
         );
     }
 
-    let mut sequence = YmSequence::load_from_path(input, clock, target_clock)?;
+    let mut sequence = YmSequence::from_file(input, clock, target_clock)?;
     if let Some(hz_override) = hz {
-        sequence.timing.frame_rate = HzOption::from(hz_override).into();
+        sequence.timing.frame_rate = hz_override.hz();
     }
     println!(
         "{} {} ({} frames @ {} Hz)...",
         style("LOADING:").bold().cyan(),
         style(input.display()).cyan(),
         sequence.frames.len(),
-        sequence.timing.frame_rate.hz_value()
+        sequence.timing.frame_rate
     );
-    AudioPlayer::play_song(&sequence, &AudioConfig::default())?;
-
-    Ok(())
+    audio::play_song(&sequence, &AudioConfig::default())
 }
 
 fn run_sfx_render(
@@ -661,20 +690,14 @@ fn run_sfx_render(
         style("LOADING SFX:").bold().cyan(),
         style(args.input.display()).cyan()
     );
-    let mut sequence = SfxSequence::load_from_path(&args.input, args.index)?;
-    if let Some(c) = args.clock {
-        sequence.source_clock = c;
-    }
-    if let Some(hz_override) = args.hz {
-        sequence.source_hz = SystemHz::from(HzOption::from(hz_override)).hz_value();
-    }
+    let sequence = SfxSequence::from_file(&args.input, args.index)?;
+    let timing = args.timing();
 
     let yfx_file = YfxFile::from_sequence(&sequence);
-    let binary = yfx_file.to_bytes();
+    let binary = yfx_file.as_bytes();
+    fs::write(&output_path, binary)?;
 
-    fs::write(&output_path, &binary)?;
-
-    let (delay_y, delay_x) = SystemHz::calculate_delay_for_hz(sequence.source_hz);
+    let (delay_y, delay_x) = timing.calculate_delay();
     let yfi_path = output_path.with_extension("yfi");
     let yfi_contents = format!(
         "; ca65 include generated by lym for {}\n\
@@ -685,8 +708,8 @@ fn run_sfx_render(
          YM_FINE      = {}\n",
         args.input.display(),
         sequence.frames.len(),
-        sequence.source_hz,
-        sequence.source_clock,
+        timing.frame_rate,
+        timing.master_clock_hz,
         delay_y,
         delay_x,
     );
@@ -698,29 +721,26 @@ fn run_sfx_render(
         style(sequence.frames.len()).cyan(),
         style(output_path.display()).cyan(),
         style(binary.len()).cyan(),
-        style(sequence.source_hz).cyan()
+        style(timing.frame_rate).cyan()
     );
 
     Ok(())
 }
 
-fn run_sfx_play(args: &SfxCommonArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut sequence = SfxSequence::load_from_path(&args.input, args.index)?;
-    if let Some(c) = args.clock {
-        sequence.source_clock = c;
-    }
-    if let Some(hz_override) = args.hz {
-        sequence.source_hz = SystemHz::from(HzOption::from(hz_override)).hz_value();
-    }
+fn run_sfx_play(
+    args: &SfxCommonArgs,
+    channel: ChannelArg,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sequence = SfxSequence::from_file(&args.input, args.index)?;
+    let timing = args.timing();
 
     println!(
         "{} {} ({} Hz)...",
         style("LOADING SFX:").bold().cyan(),
         style(args.input.display()).cyan(),
-        sequence.source_hz
+        timing.frame_rate
     );
-    AudioPlayer::play_sfx(&sequence, &AudioConfig::default())?;
-    Ok(())
+    audio::play_sfx(&sequence, channel.into(), timing, &AudioConfig::default())
 }
 
 fn run_mix(
@@ -736,7 +756,7 @@ fn run_mix(
         style("LOADING SONG:").bold().cyan(),
         style(song.display()).cyan()
     );
-    let mut song_seq = YmSequence::load_from_path(song, clock, target_clock)?;
+    let mut song_seq = YmSequence::from_file(song, clock, target_clock)?;
 
     println!(
         "{} Loading sound effect bank...",
@@ -750,14 +770,8 @@ fn run_mix(
     );
 
     if let Some(hz_override) = hz {
-        song_seq.timing.frame_rate = HzOption::from(hz_override).into();
+        song_seq.timing.frame_rate = hz_override.hz();
     }
 
-    AudioPlayer::play_mix(
-        &song_seq,
-        &sfx_list,
-        channel.into(),
-        &AudioConfig::default(),
-    )?;
-    Ok(())
+    audio::play_mix(&song_seq, &sfx_list, channel.into(), &AudioConfig::default())
 }

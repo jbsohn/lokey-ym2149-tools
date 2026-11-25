@@ -1,9 +1,7 @@
 use crate::error::YmError;
 use crate::sequence::{SfxFrame, SfxSequence};
-use crate::timing::ZX_SPECTRUM_CLOCK;
-use crate::traits::{SfxFile, SfxInput};
 
-/// Represents a compiled Lokey YM-2149 sound effect (.yfx) binary container.
+/// Represents a compiled Lokey YM-2149 sound effect (`.yfx`) binary container.
 ///
 /// Encapsulates the 5-byte fixed-width frame representation:
 /// - Byte 0: Tone period LSB (R0, R2, or R4)
@@ -39,52 +37,27 @@ impl YfxFile {
     }
 
     /// Compiles an `SfxSequence` into a `YfxFile` 5-byte binary container.
-    #[must_use]
     pub fn from_sequence(sequence: &SfxSequence) -> Self {
         let mut compiled_bytes = Vec::with_capacity(sequence.frames.len() * 5);
 
-        let mut active_tone = 0u16;
-        let mut active_volume = 0u8;
-        let mut active_tone_enable = true;
-        let mut active_noise_enable = false;
-        let mut active_noise_period = 0u8;
-
-        for frame in &sequence.frames {
-            if let Some(t) = frame.tone {
-                active_tone = t;
-            }
-            if let Some(v) = frame.volume {
-                active_volume = v;
-            }
-            if let Some(te) = frame.tone_enable {
-                active_tone_enable = te;
-            }
-            if let Some(ne) = frame.noise_enable {
-                active_noise_enable = ne;
-            }
-            if let Some(n) = frame.noise {
-                active_noise_period = n;
-            }
-
-            let tone_low = (active_tone & 0xFF) as u8;
-            let tone_high = ((active_tone >> 8) & 0x0F) as u8;
+        for &frame in &sequence.frames {
+            let tone_low = (frame.tone & 0xFF) as u8;
+            let tone_high = ((frame.tone >> 8) & 0x0F) as u8;
 
             let mut control = 0u8;
-            if active_tone_enable {
+            if frame.tone_enable {
                 control |= 0x01;
             }
-            if active_noise_enable {
+            if frame.noise_enable {
                 control |= 0x02;
             }
-            control |= (active_noise_period & 0x1F) << 3;
-
-            let duration = frame.duration.unwrap_or(1);
+            control |= (frame.noise & 0x1F) << 3;
 
             compiled_bytes.push(tone_low);
             compiled_bytes.push(tone_high);
-            compiled_bytes.push(active_volume & 0x1F);
+            compiled_bytes.push(frame.volume & 0x1F);
             compiled_bytes.push(control);
-            compiled_bytes.push(duration);
+            compiled_bytes.push(frame.tick_count());
         }
 
         Self {
@@ -93,59 +66,37 @@ impl YfxFile {
     }
 
     /// Returns the number of 5-byte frames in the compiled container.
-    #[must_use]
     pub fn frame_count(&self) -> usize {
         self.bytes.len() / 5
     }
-}
 
-impl SfxFile for YfxFile {
-    fn to_bytes(&self) -> Vec<u8> {
+    /// Borrows the compiled `.yfx` bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the compiled `.yfx` bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
     }
 
-    fn to_sequence(&self, name: &str) -> Result<SfxSequence, YmError> {
-        let mut frames = Vec::with_capacity(self.frame_count());
-        let mut pp = 0;
+    /// Decodes this `.yfx` payload into an [`SfxSequence`] named `name`.
+    pub fn to_sequence(&self, name: &str) -> SfxSequence {
+        let frames = self
+            .bytes
+            .chunks_exact(5)
+            .map(|chunk| {
+                let tone = u16::from(chunk[0]) | (u16::from(chunk[1]) << 8);
+                let volume = chunk[2];
+                let control = chunk[3];
+                let duration = chunk[4];
+                let tone_enable = (control & 0x01) != 0;
+                let noise_enable = (control & 0x02) != 0;
+                let noise = (control >> 3) & 0x1F;
+                SfxFrame::new(tone_enable, noise_enable, tone, noise, volume, duration)
+            })
+            .collect();
 
-        while pp < self.bytes.len() {
-            let tone_low = self.bytes[pp];
-            let tone_high = self.bytes[pp + 1];
-            let volume = self.bytes[pp + 2];
-            let control = self.bytes[pp + 3];
-            let duration = self.bytes[pp + 4];
-            pp += 5;
-
-            let tone = u16::from(tone_low) | (u16::from(tone_high) << 8);
-            let tone_enable = (control & 0x01) != 0;
-            let noise_enable = (control & 0x02) != 0;
-            let noise = (control >> 3) & 0x1F;
-
-            frames.push(SfxFrame::new(
-                tone_enable,
-                noise_enable,
-                tone,
-                noise,
-                volume,
-                duration,
-            ));
-        }
-
-        Ok(SfxSequence {
-            name: name.to_string(),
-            source_clock: ZX_SPECTRUM_CLOCK,
-            source_hz: 50,
-            priority: 1,
-            preferred_channels: None,
-            loop_start: None,
-            frames,
-        })
-    }
-}
-
-impl SfxInput for YfxFile {
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, YmError> {
-        let seq = self.to_sequence("sfx")?;
-        Ok(vec![seq])
+        SfxSequence::new(name, frames)
     }
 }

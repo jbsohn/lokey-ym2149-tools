@@ -3,7 +3,6 @@ use std::io::Read;
 
 use crate::error::YmError;
 use crate::sequence::YmSequence;
-use crate::traits::SongInput;
 use crate::ym_file::YmFile;
 
 /// Refuse gzip streams that expand past this many bytes.
@@ -92,30 +91,32 @@ impl VgmFile {
             uncompressed_len,
         })
     }
-}
-
-impl SongInput for VgmFile {
-    fn title(&self) -> &str {
+    /// Human-readable title or song identifier.
+    pub fn title(&self) -> &str {
         &self.name
     }
 
-    fn source_clock(&self) -> u32 {
+    /// Native PSG master clock frequency in Hz.
+    pub fn source_clock(&self) -> u32 {
         self.source_clock
     }
 
-    fn source_hz(&self) -> u16 {
+    /// Native playback frame rate in Hz.
+    pub fn source_hz(&self) -> u16 {
         self.source_hz
     }
 
-    fn to_sequence(&self, target_clock: Option<u32>) -> Result<YmSequence, YmError> {
-        Ok(YmFile::sequence_from_raw(
+    /// Converts the discretized VGM frames into a [`YmSequence`], retuning pitch
+    /// for `target_clock` (defaulting to [`crate::ATARI_7800_CLOCK`]).
+    pub fn to_sequence(&self, target_clock: Option<u32>) -> YmSequence {
+        YmFile::sequence_from_raw(
             &self.name,
             self.source_clock,
             self.source_hz,
             self.loop_frame,
             &self.raw_frames,
             target_clock,
-        ))
+        )
     }
 }
 
@@ -445,10 +446,8 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container::SongContainer;
-    use crate::traits::SongInput;
-    use crate::ysg::compile_ysg;
     use crate::YsgFile;
+    use crate::ysg::compile_ysg;
 
     const DATA_START: usize = 0x100;
 
@@ -512,7 +511,7 @@ mod tests {
         assert_eq!(vgm.raw_frames[0][13], 0x0E);
         assert_eq!(vgm.raw_frames[1][13], 0xFF);
 
-        let seq = vgm.to_sequence(Some(2_000_000)).unwrap();
+        let seq = vgm.to_sequence(Some(2_000_000));
         assert_eq!(seq.frames[0].tone_a, Some(0x0134));
         assert_eq!(seq.frames[0].volume_a, Some(0x0F));
         assert_eq!(seq.frames[0].tone_enable_a, Some(true));
@@ -520,7 +519,7 @@ mod tests {
         assert_eq!(seq.frames[1].tone_a, Some(0x0100));
         assert_eq!(seq.frames[1].envelope_shape, None);
         assert_eq!(seq.timing.master_clock_hz, 2_000_000);
-        assert_eq!(seq.timing.frame_rate.hz_value(), 50);
+        assert_eq!(seq.timing.frame_rate, 50);
     }
 
     #[test]
@@ -535,7 +534,7 @@ mod tests {
         let vgm = VgmFile::from_bytes("sixty", &bytes, None).unwrap();
         assert_eq!(vgm.source_hz, 60);
         assert_eq!(vgm.raw_frames.len(), 1);
-        let seq = vgm.to_sequence(Some(1_789_772)).unwrap();
+        let seq = vgm.to_sequence(Some(1_789_772));
         assert_eq!(seq.frames[0].tone_a, Some(0x0010));
         assert_eq!(seq.frames[0].volume_a, Some(0x0C));
         assert_eq!(seq.frames[0].envelope_shape, None);
@@ -574,7 +573,7 @@ mod tests {
         let bytes = build_vgm(2_000_000, 50, 0x01, Some(loop_abs), &commands);
         let vgm = VgmFile::from_bytes("loop", &bytes, None).unwrap();
         assert_eq!(vgm.loop_frame, Some(1));
-        let seq = vgm.to_sequence(Some(2_000_000)).unwrap();
+        let seq = vgm.to_sequence(Some(2_000_000));
         assert_eq!(seq.loop_start, Some(1));
         assert_eq!(seq.frames[0].envelope_shape, Some(0x0C));
         assert_eq!(seq.frames[1].envelope_shape, None);
@@ -596,8 +595,7 @@ mod tests {
         );
         let seq = VgmFile::from_bytes("skip", &bytes, None)
             .unwrap()
-            .to_sequence(Some(2_000_000))
-            .unwrap();
+            .to_sequence(Some(2_000_000));
         assert_eq!(seq.frames.len(), 1);
         assert_eq!(seq.frames[0].tone_a, Some(0x0055));
         assert_eq!(seq.frames[0].envelope_shape, Some(0x08));
@@ -644,8 +642,7 @@ mod tests {
         );
         let seq = VgmFile::from_bytes("pitch", &bytes, None)
             .unwrap()
-            .to_sequence(Some(1_000_000))
-            .unwrap();
+            .to_sequence(Some(1_000_000));
         // 0x07D0 = 2000, halved with the clock.
         assert_eq!(seq.frames[0].tone_a, Some(1000));
         assert_eq!(seq.timing.master_clock_hz, 1_000_000);
@@ -670,24 +667,16 @@ mod tests {
     }
 
     #[test]
-    fn container_accepts_vgm_and_vgz_extensions() {
+    fn from_bytes_accepts_vgm_and_vgz_extensions() {
         let raw = build_vgm(2_000_000, 60, 0x01, None, &[0xA0, 0x08, 0x0A, 0x62, 0x66]);
-        let vgm = SongContainer::from_bytes("demo", "VGM", &raw, None).unwrap();
-        assert_eq!(vgm.source_hz(), 60);
-        assert_eq!(
-            vgm.to_sequence("demo", Some(2_000_000))
-                .unwrap()
-                .frames
-                .len(),
-            1
-        );
+        let vgm = YmSequence::from_bytes("demo", "VGM", &raw, None, Some(2_000_000)).unwrap();
+        assert_eq!(vgm.timing.frame_rate, 60);
+        assert_eq!(vgm.frames.len(), 1);
 
-        let vgz = SongContainer::from_bytes("demo", "vgz", &gzip(&raw), None).unwrap();
-        assert_eq!(vgz.title(), "demo");
-        assert_eq!(
-            vgz.to_sequence("demo", Some(2_000_000)).unwrap().frames[0].volume_a,
-            Some(0x0A)
-        );
+        let vgz =
+            YmSequence::from_bytes("demo", "vgz", &gzip(&raw), None, Some(2_000_000)).unwrap();
+        assert_eq!(vgz.name, "demo");
+        assert_eq!(vgz.frames[0].volume_a, Some(0x0A));
     }
 
     #[test]
@@ -704,18 +693,14 @@ mod tests {
         let bytes = build_vgm(2_000_000, 50, 0x01, None, &commands);
         let seq = VgmFile::from_bytes("round", &bytes, None)
             .unwrap()
-            .to_sequence(Some(1_789_773))
-            .unwrap();
+            .to_sequence(Some(1_789_773));
         assert_eq!(seq.frames.len(), 16);
 
         let details = compile_ysg(&seq, 16).unwrap();
-        let decoded = YmSequence::from_ysg("round", &details.bytes).unwrap();
+        let decoded = YsgFile::decompile("round", &details.bytes).unwrap();
         assert_eq!(decoded.frames.len(), seq.frames.len());
         assert_eq!(decoded.timing.master_clock_hz, seq.timing.master_clock_hz);
-        assert_eq!(
-            decoded.timing.frame_rate.hz_value(),
-            seq.timing.frame_rate.hz_value()
-        );
+        assert_eq!(decoded.timing.frame_rate, seq.timing.frame_rate);
         for (index, (orig, dec)) in seq.frames.iter().zip(decoded.frames.iter()).enumerate() {
             assert_eq!(dec.tone_a, orig.tone_a, "tone A at frame {index}");
             assert_eq!(dec.volume_a, orig.volume_a, "volume A at frame {index}");
@@ -750,7 +735,7 @@ mod tests {
         assert_eq!(vgm.loop_frame, Some(0));
         assert_eq!(vgm.raw_frames.len(), 5376);
 
-        let seq = vgm.to_sequence(Some(vgm.source_clock)).unwrap();
+        let seq = vgm.to_sequence(Some(vgm.source_clock));
         assert_eq!(seq.frames[0].tone_a, Some(0x0377));
         assert_eq!(seq.frames[0].tone_b, Some(0x01BC));
         assert_eq!(seq.frames[0].tone_c, Some(0x02EA));

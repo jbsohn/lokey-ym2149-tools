@@ -1,7 +1,6 @@
 use crate::error::YmError;
 use crate::sequence::{YmFrame, YmSequence};
-use crate::timing::{SystemHz, TimingConfig, ATARI_7800_CLOCK, ATARI_ST_CLOCK};
-use crate::traits::SongInput;
+use crate::timing::{ATARI_7800_CLOCK, ATARI_ST_CLOCK, TimingConfig};
 use ym2149_common::{ChiptunePlayer, MetadataFields};
 use ym2149_ym_replayer::decompress_if_needed;
 use ym2149_ym_replayer::load_song;
@@ -208,11 +207,7 @@ impl YmFile {
 
         YmSequence {
             name: name.to_string(),
-            timing: TimingConfig {
-                master_clock_hz: target_clock,
-                frame_rate: SystemHz::Custom(u32::from(source_hz)),
-            },
-            priority: 0,
+            timing: TimingConfig::new(target_clock, u32::from(source_hz)),
             loop_start: loop_frame,
             frames,
         }
@@ -247,33 +242,35 @@ impl YmFile {
             noise_enable_c: Some((mixer & 0x20) == 0),
             envelope_period: Some(env_period),
             envelope_shape: Some(env_shape),
-            duration: None,
         }
     }
-}
 
-impl SongInput for YmFile {
-    fn title(&self) -> &str {
+    /// Human-readable title or song identifier.
+    pub fn title(&self) -> &str {
         &self.name
     }
 
-    fn source_clock(&self) -> u32 {
+    /// Native master clock frequency of the chiptune.
+    pub fn source_clock(&self) -> u32 {
         self.source_clock
     }
 
-    fn source_hz(&self) -> u16 {
+    /// Native playback frame rate in Hz.
+    pub fn source_hz(&self) -> u16 {
         self.source_hz
     }
 
-    fn to_sequence(&self, target_clock_override: Option<u32>) -> Result<YmSequence, YmError> {
-        Ok(Self::sequence_from_raw(
+    /// Unrolls the `.ym` register stream into a [`YmSequence`], retuning pitch
+    /// for `target_clock_override` (defaulting to [`ATARI_7800_CLOCK`]).
+    pub fn to_sequence(&self, target_clock_override: Option<u32>) -> YmSequence {
+        Self::sequence_from_raw(
             &self.name,
             self.source_clock,
             self.source_hz,
             self.loop_frame,
             &self.raw_frames,
             target_clock_override,
-        ))
+        )
     }
 }
 
@@ -303,7 +300,7 @@ mod tests {
         assert_eq!(ym.raw_frames[0][1], 0x01);
         assert_eq!(ym.raw_frames[0][8], 0x00);
 
-        let seq = ym.to_sequence(Some(ATARI_ST_CLOCK)).unwrap();
+        let seq = ym.to_sequence(Some(ATARI_ST_CLOCK));
         assert_eq!(seq.frames[0].tone_a, Some(0x0134));
         assert_eq!(seq.frames[0].envelope_shape, Some(0x0E));
         assert_eq!(seq.frames[1].envelope_shape, None);

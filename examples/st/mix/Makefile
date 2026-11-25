@@ -8,7 +8,7 @@ RMAC_FLAGS   := -m68000 -p -I. -I../include
 
 SONG_SRC     := ../../../tests/fixtures/song/enchant1.ym
 SFX_Z_SRC    := ../../../tests/fixtures/sfx/pew-x.afb
-SFX_X_SRC    := ../../../tests/fixtures/sfx/blip.json
+SFX_X_SRC    := ../../../tests/fixtures/sfx/blip.csv
 
 .PHONY: all clean help ensure-lym
 
@@ -56,7 +56,7 @@ $(BUILD_DIR)/sfx_x.yfx: $(SFX_X_SRC) | $(BUILD_DIR)
 # rmac assembles the whole program (including the incbin'd song/sfx data)
 # and links it straight into a runnable .tos in one step.
 $(BUILD_DIR)/mix.tos: main.s $(BUILD_DIR)/song.ysg $(BUILD_DIR)/sfx_z.yfx $(BUILD_DIR)/sfx_x.yfx \
-		../include/st.inc ../include/ym2149.inc ysg.inc | $(BUILD_DIR)
+		../include/st.inc ../include/ym2149.inc ../include/ysg.inc | $(BUILD_DIR)
 	@echo "  Assembling and linking Atari ST program..."
 	@$(RMAC) $(RMAC_FLAGS) main.s -o $@
 

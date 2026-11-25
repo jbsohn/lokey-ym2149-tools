@@ -22,7 +22,7 @@ Commands:
 
 ### `lym song render`
 
-Compiles a source music song (`.ym`, `.vgm`, `.vgz`, or `.json`) into an optimized `.ysg` binary stream and generates an
+Compiles a source music song (`.ym`, `.vgm`, `.vgz`, or `.ysg`) into an optimized `.ysg` binary stream and generates an
 accompanying `.ysi` ca65 assembly include file. Furnace Tracker songs export as `.vgm` / `.vgz`; see
 [File Formats](FileFormats.md) for the half-clock flag, frame rate, and envelope-retrigger rules.
 
@@ -34,7 +34,7 @@ lym song render --input <PATH> [OPTIONS]
 
 | Option             | Flag | Description                                                                                                                                                                                                                                                                                  | Default                          |
 |:-------------------|:-----|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------------------------|
-| `--input`          | `-i` | **Required**. Path to input song file (`.ym` chiptune, `.vgm` / `.vgz` Furnace VGM log, `.ysg`, or `.json` source).                                                                                                                                                                          | —                                |
+| `--input`          | `-i` | **Required**. Path to input song file (`.ym` chiptune, `.vgm` / `.vgz` Furnace VGM log, or `.ysg`).                                                                                                                                                                                          | —                                |
 | `--output`         | `-o` | Output `.ysg` binary path. If omitted, uses input path with `.ysg` extension.                                                                                                                                                                                                                | Same stem + `.ysg`               |
 | `--hz`             |      | Force playback refresh rate override (`50` or `60` Hz).                                                                                                                                                                                                                                      | Source Hz                        |
 | `--clock`          |      | Override source/target PSG master clock in Hz (e.g. `1789773` for Atari 7800, `2000000` for Atari ST).                                                                                                                                                                                       | Source clock                     |
@@ -82,7 +82,7 @@ lym song dump --input <PATH> [OPTIONS]
 
 | Option           | Flag | Description                                                                        | Default      |
 |:-----------------|:-----|:-----------------------------------------------------------------------------------|:-------------|
-| `--input`        | `-i` | **Required**. Path to input song file (`.ym`, `.vgm`, `.vgz`, `.ysg`, or `.json`). | —            |
+| `--input`        | `-i` | **Required**. Path to input song file (`.ym`, `.vgm`, `.vgz`, or `.ysg`).          | —            |
 | `--frames`       | `-f` | Number of sequential frames to inspect.                                            | `100`        |
 | `--start`        |      | Starting zero-indexed frame offset.                                                | `0`          |
 | `--clock`        |      | Override source PSG master clock in Hz.                                            | File default |
@@ -118,7 +118,7 @@ A song with a loop point plays until `q`. Left and right arrow seek by five seco
 
 | Option           | Flag | Description                                                                                                   | Default      |
 |:-----------------|:-----|:--------------------------------------------------------------------------------------------------------------|:-------------|
-| `--input`        | `-i` | **Required**. Path to input song file (`.ym`, `.vgm`, `.vgz`, `.ysg`, or `.json`).                            | —            |
+| `--input`        | `-i` | **Required**. Path to input song file (`.ym`, `.vgm`, `.vgz`, or `.ysg`).                                     | —            |
 | `--hz`           |      | Playback refresh rate override (`50` or `60` Hz).                                                             | File default |
 | `--raw`          |      | Play `.ym` files with the raw YM replayer, without interactive seeking controls. Emits warning on non-`.ym`. | `false`      |
 | `--clock`        |      | Override source PSG master clock in Hz.                                                                       | File default |
@@ -130,7 +130,7 @@ A song with a loop point plays until `q`. Left and right arrow seek by five seco
 
 ### `lym sfx render`
 
-Compiles a sound effect source (`.json`, `.csv`, `.afx`, `.afb`) into a 5-byte fixed-width `.yfx` payload and generates
+Compiles a sound effect source (`.csv`, `.afx`, `.afb`, or `.yfx`) into a 5-byte fixed-width `.yfx` payload and generates
 a `.yfi` ca65 include file.
 
 ```bash
@@ -139,28 +139,28 @@ lym sfx render --input <PATH> [OPTIONS]
 
 #### Options
 
-| Option     | Flag | Description                                                                   | Default            |
-|:-----------|:-----|:------------------------------------------------------------------------------|:-------------------|
-| `--input`  | `-i` | **Required**. Path to input SFX file (`.json`, `.csv`, `.afx`, `.afb`).       | —                  |
-| `--output` | `-o` | Output `.yfx` binary path. If omitted, uses input path with `.yfx` extension. | Same stem + `.yfx` |
-| `--hz`     |      | Playback rate in Hz (`50` or `60`).                                           | File default       |
-| `--clock`  |      | Source chip clock in Hz.                                                      | File default       |
-| `--index`  |      | Zero-indexed sound effect selection when rendering multi-effect `.afb` banks. | `0`                |
+| Option     | Flag | Description                                                                   | Default                      |
+|:-----------|:-----|:------------------------------------------------------------------------------|:-----------------------------|
+| `--input`  | `-i` | **Required**. Path to input SFX file (`.csv`, `.afx`, `.afb`, or `.yfx`).     | —                            |
+| `--output` | `-o` | Output `.yfx` binary path. If omitted, uses input path with `.yfx` extension. | Same stem + `.yfx`           |
+| `--hz`     |      | Playback rate in Hz (`50` or `60`).                                           | `50`                         |
+| `--clock`  |      | Target chip clock in Hz for `.yfi` timing constants.                          | `1773400` (AYFX/ZX Spectrum) |
+| `--index`  |      | Zero-indexed sound effect selection when rendering multi-effect `.afb` banks. | `0`                          |
 
 ---
 
 ### `lym sfx play`
 
 Auditions a sound effect sequence through system audio via cycle-accurate YM2149 emulation. Supports both raw source
-files (`.json`, `.csv`, `.afx`, `.afb`) and compiled target `.yfx` binaries, enabling direct A/B audio comparison before
+files (`.csv`, `.afx`, `.afb`) and compiled target `.yfx` binaries, enabling direct A/B audio comparison before
 and after compilation.
 
 ```bash
-# Step 1: Audition raw JSON sound effect source:
-lym sfx play --input tests/fixtures/sfx/blip.json
+# Step 1: Audition raw CSV sound effect source:
+lym sfx play --input tests/fixtures/sfx/blip.csv
 
 # Step 2: Render into 5-byte fixed-width .yfx payload (also auto-generates .yfi ca65 include):
-lym sfx render --input tests/fixtures/sfx/blip.json --output tests/fixtures/sfx/blip.yfx
+lym sfx render --input tests/fixtures/sfx/blip.csv --output tests/fixtures/sfx/blip.yfx
 
 # Step 3: Audition compiled .yfx target binary payload:
 lym sfx play --input tests/fixtures/sfx/blip.yfx
@@ -168,12 +168,13 @@ lym sfx play --input tests/fixtures/sfx/blip.yfx
 
 #### Options
 
-| Option    | Flag | Description                                                               | Default      |
-|:----------|:-----|:--------------------------------------------------------------------------|:-------------|
-| `--input` | `-i` | **Required**. Path to SFX file (`.json`, `.csv`, `.afx`, `.afb`, `.yfx`). | —            |
-| `--hz`    |      | Playback rate override (`50` or `60` Hz).                                 | File default |
-| `--clock` |      | Source chip clock in Hz.                                                  | File default |
-| `--index` |      | Zero-indexed effect selection for `.afb` banks.                           | `0`          |
+| Option      | Flag | Description                                                       | Default                      |
+|:------------|:-----|:------------------------------------------------------------------|:-----------------------------|
+| `--input`   | `-i` | **Required**. Path to SFX file (`.csv`, `.afx`, `.afb`, `.yfx`).  | —                            |
+| `--channel` | `-c` | YM channel for playback (`a`, `b`, or `c`).                       | `a`                          |
+| `--hz`      |      | Playback rate override (`50` or `60` Hz).                         | `50`                         |
+| `--clock`   |      | Chip clock in Hz.                                                 | `1773400` (AYFX/ZX Spectrum) |
+| `--index`   |      | Zero-indexed effect selection for `.afb` banks.                   | `0`                          |
 
 ---
 
@@ -190,8 +191,8 @@ lym mix --song <SONG_PATH> --sfx <SFX_PATHS...> [OPTIONS]
 
 | Option           | Flag | Description                                                                                             | Default                |
 |:-----------------|:-----|:--------------------------------------------------------------------------------------------------------|:-----------------------|
-| `--song`         | `-s` | **Required**. Background song file (`.ysg`, `.ym`, `.vgm`, `.vgz`, `.json`).                            | —                      |
-| `--sfx`          | `-e` | **Required**. One or more sound effect files or banks (`.yfx`, `.json`, `.csv`, `.afx`, `.afb`).        | —                      |
+| `--song`         | `-s` | **Required**. Background song file (`.ysg`, `.ym`, `.vgm`, `.vgz`).                                     | —                      |
+| `--sfx`          | `-e` | **Required**. One or more sound effect files or banks (`.yfx`, `.csv`, `.afx`, `.afb`).                 | —                      |
 | `--channel`      | `-c` | Preferred primary YM channel for sound effects (`a`, `b`, or `c`).                                      | `c`                    |
 | `--hz`           |      | Playback rate override (`50` or `60` Hz).                                                               | Song default           |
 | `--clock`        |      | Source chip clock in Hz.                                                                                | `2000000` (Atari ST)   |

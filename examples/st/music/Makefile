@@ -68,7 +68,7 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgz | $(BUILD_DIR)
 # --- Generate per-song assembly wrapper ---
 # ysg_player.s (containing entry point start:) MUST come first in .text so GEMDOS
 # executes code instead of raw YSG header bytes at offset text+0x00.
-$(BUILD_DIR)/%.music.s: $(BUILD_DIR)/%.ysg ysg_player.s ysg.inc ../include/st.inc ../include/ym2149.inc | $(BUILD_DIR)
+$(BUILD_DIR)/%.music.s: $(BUILD_DIR)/%.ysg ysg_player.s ../include/ysg.inc ../include/st.inc ../include/ym2149.inc | $(BUILD_DIR)
 	@printf '.include "ysg_player.s"\n\n.text\n.globl music_data\nmusic_data:\n    .incbin "%s"\n    .even\n' \
 		"$(BUILD_DIR)/$*.ysg" > $@
 
