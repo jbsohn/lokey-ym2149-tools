@@ -114,11 +114,7 @@ impl YmFile {
                 decompressed[24],
                 decompressed[25],
             ]);
-            if clock > 0 {
-                clock
-            } else {
-                ATARI_ST_CLOCK
-            }
+            if clock > 0 { clock } else { ATARI_ST_CLOCK }
         } else {
             ATARI_ST_CLOCK
         }

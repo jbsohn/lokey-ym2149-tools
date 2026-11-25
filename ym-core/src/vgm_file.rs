@@ -263,11 +263,7 @@ fn detect_hz(data: &[u8], data_start: usize, rate: u32) -> Result<u16, YmError> 
         }
         pos = next;
     }
-    if wait_50 > wait_60 {
-        Ok(50)
-    } else {
-        Ok(60)
-    }
+    if wait_50 > wait_60 { Ok(50) } else { Ok(60) }
 }
 
 fn parse_frames(
@@ -478,8 +474,8 @@ mod tests {
     }
 
     fn gzip(raw: &[u8]) -> Vec<u8> {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(raw).unwrap();

@@ -82,7 +82,13 @@ impl YmSequence {
         let extension = input.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let name = input.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
 
-        Self::from_bytes(name, extension, &bytes, clock_override, target_clock_override)
+        Self::from_bytes(
+            name,
+            extension,
+            &bytes,
+            clock_override,
+            target_clock_override,
+        )
     }
 
     /// Retunes all frame periods from `self.timing.master_clock_hz` to `target_clock`.
@@ -385,11 +391,7 @@ impl SfxFrame {
 
     /// Number of physical playback ticks this frame occupies (at least 1).
     pub const fn tick_count(self) -> u8 {
-        if self.duration == 0 {
-            1
-        } else {
-            self.duration
-        }
+        if self.duration == 0 { 1 } else { self.duration }
     }
 
     /// Writes SFX frame values to a specific YM-2149 audio channel.

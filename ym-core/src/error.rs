@@ -44,7 +44,9 @@ pub enum YmError {
     InvalidPatternBounds(&'static str),
 
     /// Pattern index in sequence table is out of bounds of the unique patterns pool.
-    #[error("{track} step {step} pattern index {index} out of bounds ({unique_count} unique patterns)")]
+    #[error(
+        "{track} step {step} pattern index {index} out of bounds ({unique_count} unique patterns)"
+    )]
     InvalidPatternIndex {
         track: &'static str,
         step: usize,
@@ -77,7 +79,9 @@ pub enum YmError {
     SongTooLong { patterns: usize, max: usize },
 
     /// Compiled song exceeds the YSG maximum file size limit.
-    #[error("Compiled song ({size} bytes) exceeds the YSG {max}-byte limit; try --step 2, a different --pattern-frames, or --max-bytes to truncate")]
+    #[error(
+        "Compiled song ({size} bytes) exceeds the YSG {max}-byte limit; try --step 2, a different --pattern-frames, or --max-bytes to truncate"
+    )]
     SongBinaryTooLarge { size: usize, max: usize },
 
     /// Automated candidate search failed to find a valid pattern frame size.
@@ -113,7 +117,9 @@ pub enum YmError {
     InvalidVgmMagic([u8; 4]),
 
     /// VGM v1.51+ header has no AY-3-8910 / YM2149 clock, or the clock is zero.
-    #[error("VGM file has no AY-3-8910 / YM2149 clock (need v1.51+ with a non-zero clock at offset 0x74)")]
+    #[error(
+        "VGM file has no AY-3-8910 / YM2149 clock (need v1.51+ with a non-zero clock at offset 0x74)"
+    )]
     MissingAy8910Clock,
 
     /// Command byte is not a documented VGM opcode, so the stream can no longer be aligned.

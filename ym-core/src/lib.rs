@@ -12,9 +12,7 @@ pub use ayfx::AyfxFile;
 pub use error::{Result, YmError};
 pub use player::{YmDataRenderer, YmMixer, YmSfxRenderer, YmSongRenderer};
 pub use sequence::{SfxFrame, SfxSequence, YmChannel, YmFrame, YmSequence};
-pub use timing::{
-    APPLE2_CLOCK, ATARI_7800_CLOCK, ATARI_ST_CLOCK, TimingConfig, ZX_SPECTRUM_CLOCK,
-};
+pub use timing::{APPLE2_CLOCK, ATARI_7800_CLOCK, ATARI_ST_CLOCK, TimingConfig, ZX_SPECTRUM_CLOCK};
 pub use vgm_file::VgmFile;
 pub use yfx::YfxFile;
 pub use ym_file::YmFile;
@@ -49,10 +47,7 @@ mod tests {
 
     #[test]
     fn test_yfx_compilation_basic() {
-        let seq = SfxSequence::new(
-            "test_sfx",
-            vec![SfxFrame::new(true, false, 450, 0, 15, 1)],
-        );
+        let seq = SfxSequence::new("test_sfx", vec![SfxFrame::new(true, false, 450, 0, 15, 1)]);
 
         let payload = YfxFile::from_sequence(&seq).to_bytes();
         assert_eq!(payload.len(), 5);
@@ -125,7 +120,9 @@ mod tests {
         let payload = yfx.to_bytes();
         assert_eq!(payload.len(), 10);
 
-        let decoded = YfxFile::from_bytes(&payload).unwrap().to_sequence("test_sfx");
+        let decoded = YfxFile::from_bytes(&payload)
+            .unwrap()
+            .to_sequence("test_sfx");
         assert_eq!(decoded, source_seq);
     }
 

@@ -307,8 +307,20 @@ fn run_song_dump(
     let end = (start + frames).min(sequence.frames.len());
     println!(
         "{:>6}  {:>6} {:>6} {:>6}  {:>4}  {:>4}  {:>3} {:>3} {:>3}  {:>4} {:>4} {:>4}  {:>4}  {:>4}  R13",
-        "frame", "toneA", "toneB", "toneC", "volA", "volB", "volC",
-        "teA", "teB", "teC", "neA", "neB", "neC", "envP"
+        "frame",
+        "toneA",
+        "toneB",
+        "toneC",
+        "volA",
+        "volB",
+        "volC",
+        "teA",
+        "teB",
+        "teC",
+        "neA",
+        "neB",
+        "neC",
+        "envP"
     );
     for (i, f) in sequence.frames[start..end].iter().enumerate() {
         let r13 = match f.envelope_shape {
@@ -330,7 +342,8 @@ fn run_song_dump(
             f.noise_enable_a.map_or("-", |v| if v { "T" } else { "f" }),
             f.noise_enable_b.map_or("-", |v| if v { "T" } else { "f" }),
             f.noise_enable_c.map_or("-", |v| if v { "T" } else { "f" }),
-            f.envelope_period.map_or_else(|| "-".into(), |v| v.to_string()),
+            f.envelope_period
+                .map_or_else(|| "-".into(), |v| v.to_string()),
             r13,
         );
     }
@@ -773,5 +786,10 @@ fn run_mix(
         song_seq.timing.frame_rate = hz_override.hz();
     }
 
-    audio::play_mix(&song_seq, &sfx_list, channel.into(), &AudioConfig::default())
+    audio::play_mix(
+        &song_seq,
+        &sfx_list,
+        channel.into(),
+        &AudioConfig::default(),
+    )
 }
