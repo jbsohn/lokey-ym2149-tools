@@ -43,7 +43,7 @@ $(BUILD_DIR)/music.o: $(BUILD_DIR)/music.s
 	@$(CA65) $< -o $@
 
 # Assemble 6502 main.s
-$(BUILD_DIR)/main.o: main.s $(BUILD_DIR)/pew-x.yfx ../include/maria.inc ../include/ym2149.inc ysg.inc | $(BUILD_DIR)
+$(BUILD_DIR)/main.o: main.s $(BUILD_DIR)/pew-x.yfx ../include/maria.inc ../include/ym2149.inc ../include/ysg.inc | $(BUILD_DIR)
 	@echo "  Assembling 6502 main.s..."
 	@$(CA65) -I . -I ../include -I $(BUILD_DIR) main.s -o $@
 

@@ -1,42 +1,31 @@
+use crate::error::YmError;
 use crate::sequence::{SfxFrame, SfxSequence};
-use crate::timing::ZX_SPECTRUM_CLOCK;
-use crate::traits::SfxInput;
 
-/// Represents an AYFX sound effect source (.afx single effect, .afb bank, or .csv export).
-///
-/// Implements `SfxInput` to produce canonical `SfxSequence` instances.
-#[derive(Debug, Clone, PartialEq)]
+/// Represents an AYFX sound effect source (`.afx` single effect, `.afb` bank, or `.csv` export).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AyfxFile {
     pub sequences: Vec<SfxSequence>,
 }
 
 impl AyfxFile {
-    /// Parses a single AYFX effect binary (.afx) into an `AyfxFile`.
+    /// Parses a single AYFX effect binary (`.afx`) into an `AyfxFile`.
     ///
     /// # Errors
     /// Returns an error if frame decoding fails.
-    pub fn from_effect(name: &str, bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_effect(name: &str, bytes: &[u8]) -> Result<Self, YmError> {
         let (frames, _) = Self::decode_ayfx_frames(bytes);
         Ok(Self {
-            sequences: vec![SfxSequence {
-                name: name.to_string(),
-                source_clock: ZX_SPECTRUM_CLOCK,
-                source_hz: 50,
-                priority: 1,
-                preferred_channels: None,
-                loop_start: None,
-                frames,
-            }],
+            sequences: vec![SfxSequence::new(name, frames)],
         })
     }
 
-    /// Parses an AYFX bank binary (.afb) containing multiple sound effects.
+    /// Parses an AYFX bank binary (`.afb`) containing multiple sound effects.
     ///
     /// # Errors
     /// Returns an error if the binary payload is empty or offset table pointers are truncated.
-    pub fn from_bank(bank_data: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_bank(bank_data: &[u8]) -> Result<Self, YmError> {
         if bank_data.is_empty() {
-            return Err("Empty bank data".into());
+            return Err(YmError::EmptyBank);
         }
 
         let num_effects = bank_data[0] as usize;
@@ -45,44 +34,45 @@ impl AyfxFile {
         for i in 0..num_effects {
             let offset_ptr = 1 + i * 2;
             if offset_ptr + 1 >= bank_data.len() {
-                break;
+                return Err(YmError::MalformedBank(format!(
+                    "Offset table truncated for effect {i}"
+                )));
             }
             let offset_val = (u16::from(bank_data[offset_ptr])
                 | (u16::from(bank_data[offset_ptr + 1]) << 8))
                 as usize;
             let start_idx = 2 + i * 2 + offset_val;
             if start_idx >= bank_data.len() {
-                continue;
+                return Err(YmError::MalformedBank(format!(
+                    "Effect {i} start offset {start_idx} is out of bounds"
+                )));
             }
 
             let max_len = Self::calculate_ayfx_effect_max_len(bank_data, i, num_effects, start_idx);
             let end_limit = (start_idx + max_len).min(bank_data.len());
             if start_idx >= end_limit {
-                continue;
+                return Err(YmError::MalformedBank(format!(
+                    "Effect {i} length is zero or invalid"
+                )));
             }
 
             let (frames, consumed) = Self::decode_ayfx_frames(&bank_data[start_idx..end_limit]);
             let name = Self::parse_ayfx_effect_name(bank_data, start_idx + consumed, end_limit, i);
 
-            sequences.push(SfxSequence {
-                name,
-                source_clock: ZX_SPECTRUM_CLOCK,
-                source_hz: 50,
-                priority: 1,
-                preferred_channels: None,
-                loop_start: None,
-                frames,
-            });
+            sequences.push(SfxSequence::new(name, frames));
         }
 
         Ok(Self { sequences })
     }
 
-    /// Parses an AYFX CSV table (.csv) into an `AyfxFile`.
+    /// Parses an AYFX CSV table (`.csv`) into an `AyfxFile`.
+    ///
+    /// Supports standard 5-column `AYFXEdit` exports (`ToneEnable,NoiseEnable,Tone,Noise,Volume`)
+    /// as well as an optional 6th `Duration` column (in ticks, defaulting to `1`).
     ///
     /// # Errors
     /// Returns an error if CSV column values cannot be parsed.
-    pub fn from_csv(name: &str, content: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_csv(name: &str, content: &str) -> Result<Self, YmError> {
         let mut frames = Vec::new();
         for (line_num, line) in content.lines().enumerate() {
             let line = line.trim();
@@ -90,19 +80,17 @@ impl AyfxFile {
                 continue;
             }
             let parts: Vec<&str> = line.split(',').map(str::trim).collect();
-            if parts.len() < 5 {
-                return Err(format!(
-                    "Line {}: expected at least 5 columns, found {}",
-                    line_num + 1,
-                    parts.len()
-                )
-                .into());
+            if parts.len() < 5 || parts.len() > 6 {
+                return Err(YmError::MalformedCsv {
+                    line: line_num + 1,
+                    message: format!("expected 5 or 6 columns, found {}", parts.len()),
+                });
             }
 
             let t = parts[0].parse::<i32>()? != 0;
             let n = parts[1].parse::<i32>()? != 0;
 
-            let parse_val = |s: &str| -> Result<u16, Box<dyn std::error::Error>> {
+            let parse_val = |s: &str| -> Result<u16, YmError> {
                 if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                     Ok(u16::from_str_radix(hex, 16)?)
                 } else {
@@ -113,21 +101,30 @@ impl AyfxFile {
             let tone = parse_val(parts[2])?;
             let noise = (parse_val(parts[3])? & 0x1F) as u8;
             let volume = (parse_val(parts[4])? & 0x1F) as u8;
+            let duration = if let Some(&dur_str) = parts.get(5).filter(|s| !s.is_empty()) {
+                let dur = parse_val(dur_str)?;
+                if dur == 0 || dur > 255 {
+                    return Err(YmError::MalformedCsv {
+                        line: line_num + 1,
+                        message: format!("duration '{dur_str}' must be in 1..=255"),
+                    });
+                }
+                dur as u8
+            } else {
+                1
+            };
 
-            frames.push(SfxFrame::new(t, n, tone, noise, volume, 1));
+            frames.push(SfxFrame::new(t, n, tone, noise, volume, duration));
         }
 
         Ok(Self {
-            sequences: vec![SfxSequence {
-                name: name.to_string(),
-                source_clock: ZX_SPECTRUM_CLOCK,
-                source_hz: 50,
-                priority: 1,
-                preferred_channels: None,
-                loop_start: None,
-                frames,
-            }],
+            sequences: vec![SfxSequence::new(name, frames)],
         })
+    }
+
+    /// Returns a cloned list of decoded sound effect sequences.
+    pub fn to_sequences(&self) -> Vec<SfxSequence> {
+        self.sequences.clone()
     }
 
     /// Decodes AYFX frame bitstream data.
@@ -189,12 +186,11 @@ impl AyfxFile {
                     | (u16::from(bank_data[next_ptr + 1]) << 8))
                     as usize;
                 let next_start_idx = 4 + i * 2 + next_offset_val;
-                if next_start_idx <= bank_data.len() {
-                    if let Some(diff) = next_start_idx.checked_sub(start_idx) {
-                        if diff > 0 {
-                            return diff;
-                        }
-                    }
+                if next_start_idx <= bank_data.len()
+                    && let Some(diff) = next_start_idx.checked_sub(start_idx)
+                    && diff > 0
+                {
+                    return diff;
                 }
             }
         }
@@ -214,18 +210,12 @@ impl AyfxFile {
                 name_bytes.push(bank_data[pp]);
                 pp += 1;
             }
-            if !name_bytes.is_empty() {
-                if let Ok(decoded_name) = String::from_utf8(name_bytes) {
-                    return decoded_name;
-                }
+            if !name_bytes.is_empty()
+                && let Ok(decoded_name) = String::from_utf8(name_bytes)
+            {
+                return decoded_name;
             }
         }
         format!("sfx_{}", fallback_idx + 1)
-    }
-}
-
-impl SfxInput for AyfxFile {
-    fn to_sequences(&self) -> Result<Vec<SfxSequence>, Box<dyn std::error::Error>> {
-        Ok(self.sequences.clone())
     }
 }

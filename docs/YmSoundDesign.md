@@ -8,11 +8,10 @@ The `lokey-ym-tools` pipeline compiles, auditions, and mixes sound sequences and
 
 - **Music**:
   - `.ym` (Atari ST YM5/YM6 register dumps)
+  - `.vgm` / `.vgz` (VGM register logs, including Furnace Tracker AY-3-8910 / YM2149 exports; `.vgz` and gzipped `.vgm` are inflated first)
   - `.ysg` (Compiled channel-split target binary)
-  - `.json` (Hand-authored music sequence source files)
 - **Sound Effects (SFX)**:
-  - `.json` (Hand-authored sequence source files)
-  - `.csv` (AYFXedit active-high columns visual export)
+  - `.csv` (AYFXedit active-high columns visual export, with optional 6th tick-duration column)
   - `.afx` (Single AYFX binary effect file)
   - `.afb` (Multi-effect binary sound bank)
   - `.yfx` (Compiled 5-byte target sound effect binary)
@@ -81,19 +80,24 @@ The replayer runs during the Vertical Blanking Interval (VBI). Music streams are
 
 ## Workspace Architecture (`ym-core`)
 
-The `ym-core` library decouples ingestion, compilation, and rendering through explicit traits:
+`ym-core` keeps ingestion, compilation, and mono audio rendering decoupled using concrete data structs and direct functions:
 
-### Trait Model
+### Concrete Types & Error Handling
 
-- **Music Traits**:
-  - `SongInput`: Implemented by `YmFile` and `YsgFile`. Decodes source files into `YmSequence`.
-  - `SongFile`: Implemented by `YsgFile`. Compiles `YmSequence` into a 4-track channel-split `.ysg` payload and writes to disk.
-- **SFX Traits**:
-  - `SfxInput`: Implemented by `AyfxFile` and `YfxFile`. Decodes effects into `SfxSequence`.
-  - `SfxFile`: Implemented by `YfxFile`. Compiles `SfxSequence` into 5-byte `.yfx` frames and writes to disk.
+Fallible operations return strongly typed `Result<T, YmError>` errors (derived with `thiserror`), providing structured diagnostics (`TruncatedHeader`, `InvalidMagic`, `UnsupportedVersion`, `MissingAy8910Clock`, `UnsupportedVgmCommand`, `BankIndexOutOfBounds`, `SongBinaryTooLarge`, etc.) with chained `std::error::Error::source()` propagation across I/O and format decoders.
 
-### Software PSG Emulation & Renderers (`player.rs`)
+- **Music Types**:
+  - `YmFile` / `VgmFile`: Parse `.ym` and `.vgm`/`.vgz` sources and convert them to `YmSequence` via `to_sequence`. `.vgm`/`.vgz` logs are sampled to one register frame per tick before conversion, automatically deduplicating redundant trailing loop wraparound frames and normalizing loop offsets.
+  - `YsgFile`: Compiles `YmSequence` into a 4-track channel-split `.ysg` payload and decompiles back to `YmSequence`. Optimal pattern size exploration prioritizes candidates that divide the song without silence padding and align cleanly with the loop point.
+  - `YmSequence::from_bytes` / `YmSequence::from_file`: Dispatch directly across `.ym`, `.vgm`, `.vgz`, and `.ysg`.
+- **SFX Types**:
+  - `AyfxFile`: Parses `.afx`, `.afb`, and `.csv` sources into `SfxSequence` (pure register frames only; playback timing and channel routing are provided at playback time).
+  - `YfxFile`: Compiles `SfxSequence` into 5-byte `.yfx` frames and decodes back to `SfxSequence`.
+  - `SfxSequence::from_bytes` / `SfxSequence::from_file`: Dispatch directly across `.csv`, `.afx`, `.afb`, and `.yfx`.
 
-- **`YmSongRenderer`**: Streams music frames to an emulated `Ym2149` chip instance and generates PCM audio buffers.
-- **`YmSfxRenderer`**: Renders isolated sound effects on designated channels.
-- **`YmMixer`**: Real-time multi-channel mixer supporting dynamic SFX triggering, voice takeover, and priority arbitration.
+### Pure Mono Software PSG Emulation (`player.rs`)
+
+- **`YmSongRenderer`**: Streams music frames to an emulated `Ym2149` chip instance and renders mono `f32` PCM buffers.
+- **`YmSfxRenderer`**: Renders isolated sound effects on a caller-specified `YmChannel` and `TimingConfig` into mono `f32` PCM buffers.
+- **`YmMixer`**: Real-time multi-channel mixer supporting dynamic SFX triggering and channel takeover into mono `f32` PCM buffers.
+- **`YmDataRenderer`**: Streams raw `.ym` files via `ym2149-ym-replayer` into mono `f32` PCM buffers.

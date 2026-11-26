@@ -2,12 +2,13 @@
 name = "lym"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 description = "Unified CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music songs and sound effects"
 
 [dependencies]
 ym-core = { path = "../ym-core" }
-serde_json.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true

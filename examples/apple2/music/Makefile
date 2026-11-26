@@ -22,8 +22,8 @@ DISK_IMAGE        ?= $(BUILD_DIR)/music.dsk
 DISK_SONG         ?= ND-Loader
 APPLEWIN_TEMPLATE ?= DOS 3.3 System Master - 680-0210-A.dsk
 
-YM_SOURCES  := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM)
-YSG_FILES   := $(foreach f,$(YM_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
+SONG_SOURCES := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM) $(wildcard $(YM_DIR)/*.vgm) $(wildcard $(YM_DIR)/*.vgz)
+YSG_FILES    := $(foreach f,$(SONG_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
 BIN_FILES   := $(YSG_FILES:.ysg=.bin)
 
 .PHONY: all ysg clean help ensure-lym disk
@@ -81,6 +81,16 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.ym | $(BUILD_DIR)
 		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
 
 $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ --target-clock $(TARGET_CLOCK) $(MAX_BYTES_FLAG) \
+		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgm | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ --target-clock $(TARGET_CLOCK) $(MAX_BYTES_FLAG) \
+		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgz | $(BUILD_DIR)
 	@echo "  Rendering YSG: $*"
 	@$(LYM) song render --input $< --output $@ --target-clock $(TARGET_CLOCK) $(MAX_BYTES_FLAG) \
 		|| { rm -f $@ $(BUILD_DIR)/$*.ysi; echo "  SKIP $*: unsupported format"; touch $@; }

@@ -4,7 +4,7 @@ Toolchain for compiling, auditing, and auditioning sound sequences and music str
 
 ## Crates
 
-- **`ym-core`**: Core library containing the `.ysg` channel-split music compiler, `.yfx` sound effect compiler, format abstractions (`SongInput`, `SongFile`, `SfxInput`, `SfxFile`), frame decoders (`YmFile`, `AyfxFile`), and real-time software PSG emulation (`player`).
+- **`ym-core`**: Core library containing the `.ysg` channel-split music compiler, `.yfx` sound effect compiler, concrete format decoders (`YmFile`, `VgmFile`, `YsgFile`, `AyfxFile`, `YfxFile`), and real-time mono software PSG emulation (`player`).
 - **`lym`**: CLI toolchain for compiling, auditioning, dumping, and interactively mixing YM-2149 music and sound effects.
 
 ---
@@ -32,10 +32,9 @@ This toolchain adopts a **host-precomputed producer/consumer pipeline**:
 - **Producers**:
   - **Atari ST**: Decades of chiptune compositions authored in popular ST trackers like [Music-Mon](https://demozoo.org/productions/71415/) and [maxYMiser](https://github.com/ggnkua/maxYMiser), exported as `.ym` register streams.
   - **Modern Workstations (macOS, Windows, Linux)**:
-    - **[Furnace](https://github.com/tildearrow/furnace)**: Modern multi-system tracker exporting `.ym` register streams.
+    - **[Furnace](https://github.com/tildearrow/furnace)**: Modern multi-system tracker. Export VGM (`.vgm` or gzipped `.vgz`); `lym` imports the AY-3-8910 / YM2149 register log.
     - **[Arkos Tracker](https://www.julien-nevo.com/arkostracker/)**: Cross-platform tracker for AY-3-8910/YM2149 music and sound effects.
-    - **ayFX Edit**: Sound effect designer for AY/YM PSG chips ([ayfxedit-improved](https://github.com/Threetwosevensixseven/ayfxedit-improved) for Windows/Wine, original by [Shiru](https://shiru.untergrund.net/software.shtml), or [Web version by Remy Sharp](https://zx.remysharp.com/audio/#src=MjA4LDMy)) exporting `.afx` effects, `.afb` banks, and `.csv` sequences.
-    - **Hand-authored JSON**: Direct text-editable sequence definitions for rapid iteration.
+    - **ayFX Edit**: Sound effect designer for AY/YM PSG chips ([ayfxedit-improved](https://github.com/Threetwosevensixseven/ayfxedit-improved) for Windows/Wine, original by [Shiru](https://shiru.untergrund.net/software.shtml), or [Web version by Remy Sharp](https://zx.remysharp.com/audio/#src=MjA4LDMy)) exporting `.afx` effects, `.afb` banks, and `.csv` sequences (which can also be hand-edited with an optional 6th tick-duration column).
 - **Consumer (Atari 7800 & 8-Bit Targets)**: The workstation pre-compiles music into channel-split `.ysg` opcode streams and sound effects into 5-byte `.yfx` frames. The 6502 simply consumes and streams opcodes directly to the YM2149 during VBLANK, keeping CPU overhead near zero for gameplay.
 
 ### What Is Stripped During Compilation
@@ -63,16 +62,22 @@ cargo run --bin lym -- song render --input tests/fixtures/song/ND-Loader.ym --ou
 
 # Audition compiled .ysg cartridge stream
 cargo run --bin lym -- song play --input tests/fixtures/song/ND-Loader.ysg
+
+# Furnace Tracker: play the VGM log, compile it, then play the .ysg.
+# A looping song plays until q. Loop-aligned pattern sizes are prioritized to avoid silence gaps.
+cargo run --bin lym -- song play --input song.vgm
+cargo run --bin lym -- song render --input song.vgm --output song.ysg
+cargo run --bin lym -- song play --input song.ysg
 ```
 
 ### 2. Sound Effects Workflow (`lym sfx`)
 
 ```bash
-# Audition raw sound effect source (.json, .csv, .afx, .afb)
-cargo run --bin lym -- sfx play --input tests/fixtures/sfx/blip.json
+# Audition raw sound effect source (.csv, .afx, .afb)
+cargo run --bin lym -- sfx play --input tests/fixtures/sfx/blip.csv
 
 # Render into 5-byte fixed-width .yfx payload (generates .yfi ca65 include)
-cargo run --bin lym -- sfx render --input tests/fixtures/sfx/blip.json --output tests/fixtures/sfx/blip.yfx
+cargo run --bin lym -- sfx render --input tests/fixtures/sfx/blip.csv --output tests/fixtures/sfx/blip.yfx
 
 # Audition compiled .yfx binary
 cargo run --bin lym -- sfx play --input tests/fixtures/sfx/blip.yfx
@@ -91,7 +96,7 @@ cargo run --bin lym -- mix --song tests/fixtures/song/ND-Loader.ysg --sfx tests/
 ## Documentation
 
 - **[LYM CLI Reference Guide](docs/LymReference.md)** — Command-line manual for `song`, `sfx`, and `mix` subcommands.
-- **[File Formats Specification](docs/FileFormats.md)** — Specifications for `.ysg`, `.yfx`, `.ysi`, `.yfi`, `.afx`, `.afb`, `.json`, `.csv`, `.ym`.
+- **[File Formats Specification](docs/FileFormats.md)** — Specifications for `.ysg`, `.yfx`, `.ysi`, `.yfi`, `.afx`, `.afb`, `.csv`, `.ym`, `.vgm`, `.vgz`.
 - **[YM Sound & Replayer Specification](docs/YmSoundDesign.md)** — Architecture, channel arbitration, and playback design.
 - **[Musical Credits & Test Assets](docs/Musicians.md)** — Composer attributions for test fixtures.
 

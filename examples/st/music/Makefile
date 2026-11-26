@@ -8,8 +8,8 @@ LYM          ?= ../../../target/release/lym
 RMAC         := rmac
 RMAC_FLAGS   := -m68000 -p -I. -I../include
 
-YM_SOURCES  := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM)
-YSG_FILES   := $(foreach f,$(YM_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
+SONG_SOURCES := $(wildcard $(YM_DIR)/*.ym) $(wildcard $(YM_DIR)/*.YM) $(wildcard $(YM_DIR)/*.vgm) $(wildcard $(YM_DIR)/*.vgz)
+YSG_FILES    := $(foreach f,$(SONG_SOURCES),$(BUILD_DIR)/$(notdir $(basename $(f))).ysg)
 TOS_FILES   := $(YSG_FILES:.ysg=.tos)
 
 .PHONY: all ysg clean help ensure-lym
@@ -55,10 +55,20 @@ $(BUILD_DIR)/%.ysg: $(YM_DIR)/%.YM | $(BUILD_DIR)
 	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
 		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
 
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgm | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
+		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
+
+$(BUILD_DIR)/%.ysg: $(YM_DIR)/%.vgz | $(BUILD_DIR)
+	@echo "  Rendering YSG: $*"
+	@$(LYM) song render --input $< --output $@ --target-clock 2000000 \
+		|| { rm -f $@; echo "  SKIP $*: unsupported format"; touch $@; }
+
 # --- Generate per-song assembly wrapper ---
 # ysg_player.s (containing entry point start:) MUST come first in .text so GEMDOS
 # executes code instead of raw YSG header bytes at offset text+0x00.
-$(BUILD_DIR)/%.music.s: $(BUILD_DIR)/%.ysg ysg_player.s ysg.inc ../include/st.inc ../include/ym2149.inc | $(BUILD_DIR)
+$(BUILD_DIR)/%.music.s: $(BUILD_DIR)/%.ysg ysg_player.s ../include/ysg.inc ../include/st.inc ../include/ym2149.inc | $(BUILD_DIR)
 	@printf '.include "ysg_player.s"\n\n.text\n.globl music_data\nmusic_data:\n    .incbin "%s"\n    .even\n' \
 		"$(BUILD_DIR)/$*.ysg" > $@
 

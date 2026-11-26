@@ -24,6 +24,16 @@ The following YM chiptune tracks were sourced from the **StSound** collection ([
 
 ---
 
+## Modern & Furnace Tracker Test Fixtures
+
+The following VGM test fixture exercises modern AY-3-8910 tracker export parsing, loop point detection, and optimal pattern compilation:
+
+| Track File (`tests/fixtures/song/`) | Author / Source | Description |
+| :--- | :--- | :--- |
+| `AY-3-8910_Jam.vgm` | AY-3-8910 Chiptune Jam | AY-3-8910 VGM log exported from Furnace Tracker (50 Hz, 1.789773 MHz, looping). |
+
+---
+
 ## Technical Note & Disclaimer
 
 These musical assets are included strictly for educational, research, and non-commercial hardware/software verification purposes. All copyrights remain with their original authors and composers.
